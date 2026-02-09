@@ -33,14 +33,17 @@ Disabled placeholder for now. Graph logic removed in this iteration.
 ## Frontend
 
 ### `frontend/src/App.tsx`
-Main UI for:
-- SSO login with provider dropdown.
-- listing integrations,
-- admin connect buttons,
-- member "ask your admin" UX.
+Main UI shell and flow:
+- top navigation + hero section,
+- SSO login form with provider dropdown,
+- integration cards section with admin connect actions,
+- simple pricing cards section.
 
 ### `frontend/src/components/IntegrationCard.tsx`
-Small presentational card for each integration.
+Presentational card for each integration with status, subtitle, and connect button state.
+
+### `frontend/src/styles.css`
+Comprehensive styling for layout, typography, cards, gradient buttons, and responsive breakpoints.
 
 ### `frontend/src/api.ts`
 Browser API calls to FastAPI endpoints, including provider fetch.
@@ -49,7 +52,7 @@ Browser API calls to FastAPI endpoints, including provider fetch.
 Frontend TypeScript types shared across UI and API layer.
 
 ### `frontend/src/main.tsx`
-React entrypoint.
+React entrypoint and CSS import.
 
 ### `frontend/package.json`, `frontend/tsconfig.json`, `frontend/index.html`
 Vite + TypeScript app configuration/bootstrap.

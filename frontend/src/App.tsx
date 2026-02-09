@@ -21,7 +21,7 @@ export function App() {
         if (data.providers.length > 0) setIdpProvider(data.providers[0]);
       })
       .catch(() => {
-        // Keep local fallback providers.
+        // Keep local fallback providers when API is unavailable.
       });
   }, []);
 
@@ -49,14 +49,33 @@ export function App() {
   }
 
   return (
-    <main style={{ maxWidth: 700, margin: "24px auto", fontFamily: "Arial, sans-serif" }}>
-      <h1>PM Integration Console</h1>
-      <p>SSO once, admin connects tools once, team members inherit access.</p>
+    <div className="page-shell">
+      <header className="top-nav">
+        <div className="brand">Prod<span>Pilot</span></div>
+        <nav>
+          <a href="#features">Features</a>
+          <a href="#integrations">Integrations</a>
+          <a href="#pricing">Pricing</a>
+        </nav>
+        <button className="btn btn-primary">Join the Waitlist</button>
+      </header>
 
-      {!session ? (
-        <section>
-          <div>
-            <label>SSO Provider: </label>
+      <section className="hero">
+        <p className="kicker">The AI workspace for Product Managers</p>
+        <h1>
+          Ship products faster with <span>AI superpowers</span>
+        </h1>
+        <p className="hero-copy">
+          One SSO, admin-managed integrations, and progressive consent for actions that act as a user.
+        </p>
+      </section>
+
+      <section className="auth-panel" id="features">
+        <h2>Sign in once with your identity provider</h2>
+        <p>Choose your org SSO provider like Atlassian: Microsoft Entra ID, Google Workspace, Okta, or SAML.</p>
+        <div className="auth-grid">
+          <label>
+            SSO Provider
             <select value={idpProvider} onChange={(e) => setIdpProvider(e.target.value as IdPName)}>
               {providers.map((provider) => (
                 <option key={provider} value={provider}>
@@ -64,32 +83,93 @@ export function App() {
                 </option>
               ))}
             </select>
-          </div>
-          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-          <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Full name" />
-          <label>
-            <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} /> Admin
           </label>
-          <button onClick={onLogin}>Login with SSO</button>
-        </section>
-      ) : (
-        <section>
-          <div>
-            Logged in as <b>{session.user_email}</b> via <b>{session.idp_provider}</b> ({session.is_admin ? "Admin" : "Member"})
-          </div>
-          <h3>Org Integrations ({session.org_domain})</h3>
+          <label>
+            Work email
+            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
+          </label>
+          <label>
+            Full name
+            <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Casey Product" />
+          </label>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
+            I am an org admin
+          </label>
+        </div>
+        <button className="btn btn-gradient" onClick={onLogin}>
+          Continue with SSO →
+        </button>
+      </section>
+
+      <section className="integration-section" id="integrations">
+        <div className="section-header">
+          <p className="kicker">Admin Connect Stack</p>
+          <h2>Connect once, everyone inherits access</h2>
+          {session ? (
+            <p>
+              Logged in as <strong>{session.user_email}</strong> via <strong>{session.idp_provider}</strong> in <strong>{session.org_domain}</strong>.
+            </p>
+          ) : (
+            <p>Login to view and manage integration state.</p>
+          )}
+        </div>
+
+        <div className="cards-grid">
           {integrations.map((name) => (
             <IntegrationCard
               key={name}
               name={name}
               connected={Boolean(statusMap[name]?.connected)}
-              canConnect={session.is_admin}
+              canConnect={Boolean(session?.is_admin)}
+              connectedBy={statusMap[name]?.connected_by ?? null}
               onConnect={onConnect}
             />
           ))}
-          {!session.is_admin && <p>Ask your admin to connect missing integrations.</p>}
-        </section>
-      )}
-    </main>
+        </div>
+
+        {session && !session.is_admin && (
+          <div className="notice">Ask your admin to connect missing tools. You only need user consent when doing write actions as yourself.</div>
+        )}
+      </section>
+
+      <section className="pricing" id="pricing">
+        <p className="kicker">Pricing</p>
+        <h2>Simple, transparent pricing</h2>
+        <div className="pricing-grid">
+          <article>
+            <h3>Free</h3>
+            <p className="price">$0 <span>/ forever</span></p>
+            <ul>
+              <li>1 workspace</li>
+              <li>Basic integration status</li>
+              <li>Community support</li>
+            </ul>
+            <button className="btn">Start Free</button>
+          </article>
+          <article className="popular">
+            <span className="badge">Most Popular</span>
+            <h3>Pro</h3>
+            <p className="price">$29 <span>/ month</span></p>
+            <ul>
+              <li>Admin connect stack</li>
+              <li>Progressive consent actions</li>
+              <li>Priority support</li>
+            </ul>
+            <button className="btn btn-gradient">Get Started</button>
+          </article>
+          <article>
+            <h3>Enterprise</h3>
+            <p className="price">Custom</p>
+            <ul>
+              <li>Advanced security</li>
+              <li>Unlimited users</li>
+              <li>Dedicated success manager</li>
+            </ul>
+            <button className="btn">Contact Sales</button>
+          </article>
+        </div>
+      </section>
+    </div>
   );
 }
