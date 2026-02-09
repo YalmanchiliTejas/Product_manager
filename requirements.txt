@@ -1,3 +1,2 @@
-pytorch
-numpy
-pandas
+fastapi
+uvicorn
