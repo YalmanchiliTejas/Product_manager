@@ -35,9 +35,9 @@ Disabled placeholder for now. Graph logic removed in this iteration.
 ### `frontend/src/App.tsx`
 Main UI shell and flow:
 - top navigation + hero section,
-- SSO login form with provider dropdown,
+- SSO login form with provider buttons,
 - integration cards section with admin connect actions,
-- simple pricing cards section.
+- side-by-side login + “what happens next” panels.
 
 ### `frontend/src/components/IntegrationCard.tsx`
 Presentational card for each integration with status, subtitle, and connect button state.

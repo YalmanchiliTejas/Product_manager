@@ -37,8 +37,8 @@ npm run dev
 
 UI provides:
 
-- modern landing-page style shell (hero, integration section, pricing cards)
-- SSO login form with provider select (Microsoft/Google/Okta/SAML)
+- modern landing-page style shell (hero, focused login panel, integration section)
+- SSO login form with provider buttons (Microsoft/Google/Okta/SAML)
 - integration cards (Jira, Confluence, Slack, Teams) with admin connect actions
 - member view prompting "Ask your admin"
 

@@ -5,6 +5,20 @@ import type { IdPName, IntegrationName, IntegrationState, SessionContext } from 
 
 const integrations: IntegrationName[] = ["jira", "confluence", "slack", "teams"];
 
+const providerLabel: Record<IdPName, string> = {
+  okta: "Okta",
+  google: "Google Workspace",
+  microsoft: "Microsoft Entra ID",
+  saml: "SAML SSO"
+};
+
+const providerIcon: Record<IdPName, string> = {
+  okta: "O",
+  google: "G",
+  microsoft: "M",
+  saml: "S"
+};
+
 export function App() {
   const [session, setSession] = useState<SessionContext | null>(null);
   const [states, setStates] = useState<IntegrationState[]>([]);
@@ -53,65 +67,90 @@ export function App() {
       <header className="top-nav">
         <div className="brand">Prod<span>Pilot</span></div>
         <nav>
-          <a href="#features">Features</a>
+          <a href="#login">Login</a>
           <a href="#integrations">Integrations</a>
-          <a href="#pricing">Pricing</a>
+          <a href="#how">How it works</a>
         </nav>
-        <button className="btn btn-primary">Join the Waitlist</button>
+        <button className="btn btn-primary">Book Demo</button>
       </header>
 
       <section className="hero">
-        <p className="kicker">The AI workspace for Product Managers</p>
+        <p className="kicker">SSO + Integrations Platform</p>
         <h1>
-          Ship products faster with <span>AI superpowers</span>
+          Connect your workspace in <span>one clean flow</span>
         </h1>
         <p className="hero-copy">
-          One SSO, admin-managed integrations, and progressive consent for actions that act as a user.
+          Pick your identity provider, sign in once, and let admins connect Jira, Confluence, Slack, and Teams for everyone.
         </p>
       </section>
 
-      <section className="auth-panel" id="features">
-        <h2>Sign in once with your identity provider</h2>
-        <p>Choose your org SSO provider like Atlassian: Microsoft Entra ID, Google Workspace, Okta, or SAML.</p>
-        <div className="auth-grid">
-          <label>
-            SSO Provider
-            <select value={idpProvider} onChange={(e) => setIdpProvider(e.target.value as IdPName)}>
-              {providers.map((provider) => (
-                <option key={provider} value={provider}>
-                  {provider === "microsoft" ? "Microsoft Entra ID" : provider}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Work email
-            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
-          </label>
-          <label>
-            Full name
-            <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Casey Product" />
-          </label>
+      <section className="login-shell" id="login">
+        <article className="login-card">
+          <h2>Sign in to continue</h2>
+          <p>Use your company identity provider. No dropdown hell — just click your provider.</p>
+
+          <div className="provider-grid">
+            {providers.map((provider) => (
+              <button
+                key={provider}
+                className={`provider-btn ${idpProvider === provider ? "active" : ""}`}
+                onClick={() => setIdpProvider(provider)}
+              >
+                <span className="provider-icon">{providerIcon[provider]}</span>
+                <span>{providerLabel[provider]}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="form-grid">
+            <label>
+              Work email
+              <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
+            </label>
+            <label>
+              Full name
+              <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Casey Product" />
+            </label>
+          </div>
+
           <label className="checkbox-row">
             <input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} />
             I am an org admin
           </label>
-        </div>
-        <button className="btn btn-gradient" onClick={onLogin}>
-          Continue with SSO →
-        </button>
+
+          <button className="btn btn-gradient" onClick={onLogin}>
+            Continue with {providerLabel[idpProvider]}
+          </button>
+        </article>
+
+        <article className="preview-card" id="how">
+          <h3>What happens next</h3>
+          <ol>
+            <li>SSO creates your session.</li>
+            <li>Admin connects Jira/Confluence/Slack/Teams once.</li>
+            <li>Everyone in the org inherits read access.</li>
+            <li>User consent is asked only for write actions.</li>
+          </ol>
+          {session ? (
+            <div className="session-pill">
+              Logged in as <strong>{session.user_email}</strong> ({session.idp_provider})
+            </div>
+          ) : (
+            <div className="session-pill">Not signed in yet.</div>
+          )}
+        </article>
       </section>
 
       <section className="integration-section" id="integrations">
         <div className="section-header">
           <p className="kicker">Admin Connect Stack</p>
-          <h2>Connect once, everyone inherits access</h2>
+          <h2>Integration health</h2>
           {session ? (
             <p>
-              Logged in as <strong>{session.user_email}</strong> via <strong>{session.idp_provider}</strong> in <strong>{session.org_domain}</strong>.
+              Org: <strong>{session.org_domain}</strong> • Role: <strong>{session.is_admin ? "Admin" : "Member"}</strong>
             </p>
           ) : (
-            <p>Login to view and manage integration state.</p>
+            <p>Sign in to load integration status.</p>
           )}
         </div>
 
@@ -129,46 +168,8 @@ export function App() {
         </div>
 
         {session && !session.is_admin && (
-          <div className="notice">Ask your admin to connect missing tools. You only need user consent when doing write actions as yourself.</div>
+          <div className="notice">Ask your admin to connect missing tools. Delegated user consent is only needed for write actions.</div>
         )}
-      </section>
-
-      <section className="pricing" id="pricing">
-        <p className="kicker">Pricing</p>
-        <h2>Simple, transparent pricing</h2>
-        <div className="pricing-grid">
-          <article>
-            <h3>Free</h3>
-            <p className="price">$0 <span>/ forever</span></p>
-            <ul>
-              <li>1 workspace</li>
-              <li>Basic integration status</li>
-              <li>Community support</li>
-            </ul>
-            <button className="btn">Start Free</button>
-          </article>
-          <article className="popular">
-            <span className="badge">Most Popular</span>
-            <h3>Pro</h3>
-            <p className="price">$29 <span>/ month</span></p>
-            <ul>
-              <li>Admin connect stack</li>
-              <li>Progressive consent actions</li>
-              <li>Priority support</li>
-            </ul>
-            <button className="btn btn-gradient">Get Started</button>
-          </article>
-          <article>
-            <h3>Enterprise</h3>
-            <p className="price">Custom</p>
-            <ul>
-              <li>Advanced security</li>
-              <li>Unlimited users</li>
-              <li>Dedicated success manager</li>
-            </ul>
-            <button className="btn">Contact Sales</button>
-          </article>
-        </div>
       </section>
     </div>
   );
