@@ -157,11 +157,11 @@ async def get_or_create_tenant(db: AsyncIOMotorDatabase, email: str) -> dict:
     domain = email.split("@", 1)[1].lower()
     doc = await db.tenants.find_one({"domain": domain})
     if doc:
-        return doc
+        return doc_to_json(doc)
 
     doc = {"domain": domain, "name": domain, "created_at": utcnow()}
     await db.tenants.insert_one(doc)
-    return await db.tenants.find_one({"domain": domain})
+    return await doc_to_json(db.tenants.find_one({"domain": domain}))
 
 
 async def upsert_user(db: AsyncIOMotorDatabase, tenant_id: Any, issuer: str, sub: str, email: str, full_name: str) -> dict:
@@ -173,7 +173,7 @@ async def upsert_user(db: AsyncIOMotorDatabase, tenant_id: Any, issuer: str, sub
             {"_id": existing["_id"]},
             {"$set": {"full_name": full_name or existing.get("full_name", ""), "idp_issuer": issuer, "idp_sub": sub}},
         )
-        return await db.users.find_one({"_id": existing["_id"]})
+        return await doc_to_json(db.users.find_one({"_id": existing["_id"]}))
 
     count = await db.users.count_documents({"tenant_id": tenant_id})
     is_admin = count == 0
@@ -188,7 +188,7 @@ async def upsert_user(db: AsyncIOMotorDatabase, tenant_id: Any, issuer: str, sub
         "created_at": utcnow(),
     }
     await db.users.insert_one(doc)
-    return await db.users.find_one({"tenant_id": tenant_id, "email": email_l})
+    return await doc_to_json(db.users.find_one({"tenant_id": tenant_id, "email": email_l}))
 
 
 async def create_app_session(db: AsyncIOMotorDatabase, tenant_id: Any, user_id: Any) -> dict:
@@ -204,7 +204,7 @@ async def create_app_session(db: AsyncIOMotorDatabase, tenant_id: Any, user_id: 
         "created_at": utcnow(),
     }
     await db.sessions.insert_one(doc)
-    return doc
+    return doc_to_json(doc)
 
 
 async def get_current_user(db: AsyncIOMotorDatabase, request) -> dict:
@@ -219,6 +219,8 @@ async def get_current_user(db: AsyncIOMotorDatabase, request) -> dict:
     user = await db.users.find_one({"_id": sess["user_id"]})
     if not user:
         raise PermissionError("Invalid session user")
+    user = doc_to_json(user)
+    user["_session"] = doc_to_json(sess)
     return user
 
 
