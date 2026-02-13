@@ -4,8 +4,14 @@ from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException
 
-from .models import ActionRequest, AdminConnectRequest, SSOLoginRequest
-from .services import PlatformService
+from .models import (
+    ActionRequest,
+    AdminConnectRequest,
+    InterviewIngestRequest,
+    MultiAgentStartRequest,
+    SSOLoginRequest,
+)
+from .platform_service import PlatformService
 
 app = FastAPI(title="PM Integration Backend", version="0.4.0")
 service = PlatformService()
@@ -69,5 +75,36 @@ def grant_consent(integration: str, session_id: str) -> dict:
     try:
         service.grant_consent(session_id, integration)
         return {"session_id": session_id, "integration": integration, "consent_granted": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/multi-agent/start")
+def start_multi_agent_workflow(payload: MultiAgentStartRequest) -> dict:
+    try:
+        return service.start_multi_agent_workflow(
+            session_id=payload.session_id,
+            product_name=payload.product_name,
+            documents=payload.documents,
+            interview_notes=payload.interview_notes,
+            target_integrations=payload.target_integrations,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/multi-agent/runs/{run_id}")
+def get_multi_agent_run(run_id: str) -> dict:
+    try:
+        return service.workflow_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/multi-agent/interviews/ingest")
+def ingest_interview_feedback(payload: InterviewIngestRequest) -> dict:
+    try:
+        run = service.ingest_interview_feedback(payload.run_id, payload.notes)
+        return {"run": run, "status": "updated"}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
