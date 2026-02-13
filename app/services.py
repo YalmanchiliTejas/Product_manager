@@ -13,6 +13,8 @@ from cryptography.fernet import Fernet
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ASCENDING, IndexModel, ReturnDocument
 from pydantic_settings import BaseSettings
+from .mongo_utils import doc_to_json
+
 
 WRITE_PREFIXES = ("create", "comment", "edit", "post", "dm")
 
@@ -157,11 +159,11 @@ async def get_or_create_tenant(db: AsyncIOMotorDatabase, email: str) -> dict:
     domain = email.split("@", 1)[1].lower()
     doc = await db.tenants.find_one({"domain": domain})
     if doc:
-        return doc
+        return doc_to_json(doc)
 
     doc = {"domain": domain, "name": domain, "created_at": utcnow()}
     await db.tenants.insert_one(doc)
-    return await db.tenants.find_one({"domain": domain})
+    return await doc_to_json(db.tenants.find_one({"domain": domain}))
 
 
 async def upsert_user(db: AsyncIOMotorDatabase, tenant_id: Any, issuer: str, sub: str, email: str, full_name: str) -> dict:
@@ -174,7 +176,7 @@ async def upsert_user(db: AsyncIOMotorDatabase, tenant_id: Any, issuer: str, sub
             {"$set": {"full_name": full_name or existing.get("full_name", ""),
                       "idp_issuer": issuer, "idp_sub": sub}}
         )
-        return await db.users.find_one({"_id": existing["_id"]})
+        return await doc_to_json(db.users.find_one({"_id": existing["_id"]}))
 
     # bootstrap: first user becomes admin
     count = await db.users.count_documents({"tenant_id": tenant_id})
@@ -190,7 +192,7 @@ async def upsert_user(db: AsyncIOMotorDatabase, tenant_id: Any, issuer: str, sub
         "created_at": utcnow(),
     }
     await db.users.insert_one(doc)
-    return await db.users.find_one({"tenant_id": tenant_id, "email": email_l})
+    return await doc_to_json(db.users.find_one({"tenant_id": tenant_id, "email": email_l}))
 
 
 async def create_app_session(db: AsyncIOMotorDatabase, tenant_id: Any, user_id: Any) -> dict:
@@ -206,7 +208,7 @@ async def create_app_session(db: AsyncIOMotorDatabase, tenant_id: Any, user_id: 
         "created_at": utcnow(),
     }
     await db.sessions.insert_one(doc)
-    return doc
+    return doc_to_json(doc)
 
 
 async def get_current_user(db: AsyncIOMotorDatabase, request) -> dict:
@@ -221,6 +223,8 @@ async def get_current_user(db: AsyncIOMotorDatabase, request) -> dict:
     user = await db.users.find_one({"_id": sess["user_id"]})
     if not user:
         raise PermissionError("Invalid session user")
+    user = doc_to_json(user)
+    user["_session"] = doc_to_json(sess)
     return user
 
 
@@ -266,16 +270,15 @@ async def save_integration(
     doc = await db.integrations.find_one_and_update(
         query, update, upsert=True, return_document=ReturnDocument.AFTER
     )
-    return doc
+    return  doc_to_json(doc)
 
 
-async def get_integration(db: AsyncIOMotorDatabase, tenant_id: Any, provider: str, auth_mode: str, user_id: Optional[Any]) -> Optional[dict]:
-    return await db.integrations.find_one({
-        "tenant_id": tenant_id,
-        "provider": provider,
-        "auth_mode": auth_mode,
-        "user_id": user_id,
-    })
+async def get_integration(db: AsyncIOMotorDatabase, tenant_id: Any, provider: str, auth_mode: str, user_id: Optional[Any], external_tenant_id: Optional[str] = None) -> Optional[dict]:
+    q = {"tenant_id": tenant_id, "provider": provider, "auth_mode": auth_mode, "user_id": user_id}
+    if external_tenant_id is not None:
+        q["external_tenant_id"] = external_tenant_id
+    doc = await db.integrations.find_one(q)
+    return doc_to_json(doc) if doc else None
 
 
 # ---------- webhook routing ----------
