@@ -3,66 +3,61 @@
 ## Backend
 
 ### `app/models.py`
-Defines all request/response dataclasses:
-- SSO login payload and validation.
-- Supported SSO providers (`okta`, `google`, `microsoft`, `saml`).
-- Session context including selected identity provider.
-- Admin integration connect payload.
-- Integration connection state.
-- Action authorization payload.
+Defines:
+- Mongo/Pydantic data models and helpers.
+- Request payload models used by FastAPI.
+- In-memory onboarding dataclasses for SSO sessions/integration state.
+- New multi-agent request models for workflow start + interview ingestion.
 
 ### `app/services.py`
-Holds business logic:
-- Session store for SSO sessions.
-- Integration store for org-level Jira/Confluence/Slack/Teams connect status.
-- Consent store for delegated user consent.
-- Platform service methods for provider listing, login, admin connect, status retrieval, and authorization checks.
+Holds Mongo utility helpers (indexes, token helpers, scope checks, webhook verification/routing) and database-facing helpers.
+
+### `app/platform_service.py`
+Holds the in-memory `PlatformService` used by current routes/tests:
+- SSO + admin integration connection + progressive consent.
+- Multi-agent orchestration flow with RLMS-style recursive context compression.
+- openclaw-style staged planner trace with per-agent step outputs.
+- PRD generation, ticket conversion/distribution, interview feedback ingestion, PM ops checklist, and model strategy notes.
 
 ### `app/main.py`
-FastAPI routes exposing the service layer:
-- `GET /auth/sso/providers`
-- `POST /auth/sso/login`
-- `POST /org/integrations/admin/connect`
-- `GET /org/integrations/status/{org_domain}`
-- `POST /actions/authorize`
-- `POST /consent/{integration}`
+FastAPI routes exposing service layer:
+- SSO + integration routes.
+- Action authorization and consent routes.
+- New multi-agent routes:
+  - `POST /multi-agent/start`
+  - `GET /multi-agent/runs/{run_id}`
+  - `POST /multi-agent/interviews/ingest`
 
 ### `app/knowledge_graph.py`
-Disabled placeholder for now. Graph logic removed in this iteration.
+Disabled placeholder for now.
 
 ## Frontend
 
 ### `frontend/src/App.tsx`
-Main UI shell and flow:
-- top navigation + hero section,
-- SSO login form with provider buttons,
-- integration cards section with admin connect actions,
-- side-by-side login + “what happens next” panels.
+Main UI shell and flow with login and integration actions.
 
 ### `frontend/src/components/IntegrationCard.tsx`
-Presentational card for each integration with status, subtitle, and connect button state.
+Card for each integration with status and connect button.
 
 ### `frontend/src/styles.css`
-Comprehensive styling for layout, typography, cards, gradient buttons, and responsive breakpoints.
+Layout and visual styling.
 
 ### `frontend/src/api.ts`
-Browser API calls to FastAPI endpoints, including provider fetch.
+Frontend API calls.
 
 ### `frontend/src/types.ts`
-Frontend TypeScript types shared across UI and API layer.
+Shared frontend types.
 
 ### `frontend/src/main.tsx`
-React entrypoint and CSS import.
-
-### `frontend/package.json`, `frontend/tsconfig.json`, `frontend/index.html`
-Vite + TypeScript app configuration/bootstrap.
+React entrypoint.
 
 ## Tests
 
 ### `tests/test_onboarding.py`
-Unit tests for backend service behavior:
-- admin connect,
-- non-admin restriction,
-- progressive consent flow,
-- supported provider list,
-- invalid provider rejection.
+Unit tests covering:
+- admin connect behavior,
+- non-admin restrictions,
+- progressive consent,
+- provider validation,
+- multi-agent run creation,
+- interview feedback ingestion updates.

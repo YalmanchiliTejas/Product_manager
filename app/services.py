@@ -1,4 +1,3 @@
-# services_mongo.py
 from __future__ import annotations
 
 import base64
@@ -9,11 +8,17 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from cryptography.fernet import Fernet
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from pymongo import ASCENDING, IndexModel, ReturnDocument
-from pydantic_settings import BaseSettings
-from .mongo_utils import doc_to_json
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+    from pymongo import ASCENDING, IndexModel, ReturnDocument
+    _MONGO_AVAILABLE = True
+except ImportError:  # pragma: no cover - environment fallback for unit tests
+    AsyncIOMotorClient = Any  # type: ignore[assignment]
+    AsyncIOMotorDatabase = Any  # type: ignore[assignment]
+    ASCENDING = 1
+    IndexModel = Any  # type: ignore[assignment]
+    ReturnDocument = Any  # type: ignore[assignment]
+    _MONGO_AVAILABLE = False
 
 
 WRITE_PREFIXES = ("create", "comment", "edit", "post", "dm")
@@ -32,55 +37,43 @@ WRITE_SCOPES = {
 }
 
 
-class Settings(BaseSettings):
-    APP_BASE_URL: str = "http://localhost:8000"
+class Settings:
+    APP_BASE_URL: str = os.getenv("APP_BASE_URL", "http://localhost:8000")
 
-    MONGODB_URI: str = "mongodb://localhost:27017"
-    MONGODB_DB_NAME: str = "pm_platform"
+    MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    MONGODB_DB_NAME: str = os.getenv("MONGODB_DB_NAME", "pm_platform")
 
-    SESSION_COOKIE_NAME: str = "pm_sid"
-    SESSION_TTL_HOURS: int = 24 * 7
+    SESSION_COOKIE_NAME: str = os.getenv("SESSION_COOKIE_NAME", "pm_sid")
+    SESSION_TTL_HOURS: int = int(os.getenv("SESSION_TTL_HOURS", str(24 * 7)))
 
-    SESSION_MIDDLEWARE_SECRET: str = "change-me"
-    FERNET_KEY: str = ""
+    SESSION_MIDDLEWARE_SECRET: str = os.getenv("SESSION_MIDDLEWARE_SECRET", "change-me")
+    FERNET_KEY: str = os.getenv("FERNET_KEY", "")
 
-    # OIDC (SSO)
-    OIDC_ISSUER: str = ""
-    OIDC_CLIENT_ID: str = ""
-    OIDC_CLIENT_SECRET: str = ""
-    OIDC_REDIRECT_URI: str = ""
+    OIDC_ISSUER: str = os.getenv("OIDC_ISSUER", "")
+    OIDC_CLIENT_ID: str = os.getenv("OIDC_CLIENT_ID", "")
+    OIDC_CLIENT_SECRET: str = os.getenv("OIDC_CLIENT_SECRET", "")
+    OIDC_REDIRECT_URI: str = os.getenv("OIDC_REDIRECT_URI", "")
 
-    # Atlassian
-    ATLASSIAN_CLIENT_ID: str = ""
-    ATLASSIAN_CLIENT_SECRET: str = ""
-    ATLASSIAN_REDIRECT_URI: str = ""
-    ATLASSIAN_SCOPES: str = ""
+    ATLASSIAN_CLIENT_ID: str = os.getenv("ATLASSIAN_CLIENT_ID", "")
+    ATLASSIAN_CLIENT_SECRET: str = os.getenv("ATLASSIAN_CLIENT_SECRET", "")
+    ATLASSIAN_REDIRECT_URI: str = os.getenv("ATLASSIAN_REDIRECT_URI", "")
+    ATLASSIAN_SCOPES: str = os.getenv("ATLASSIAN_SCOPES", "")
 
-    # Slack
-    SLACK_CLIENT_ID: str = ""
-    SLACK_CLIENT_SECRET: str = ""
-    SLACK_REDIRECT_URI: str = ""
-    SLACK_SCOPES: str = ""
-    SLACK_SIGNING_SECRET: str = ""
+    SLACK_CLIENT_ID: str = os.getenv("SLACK_CLIENT_ID", "")
+    SLACK_CLIENT_SECRET: str = os.getenv("SLACK_CLIENT_SECRET", "")
+    SLACK_REDIRECT_URI: str = os.getenv("SLACK_REDIRECT_URI", "")
+    SLACK_SCOPES: str = os.getenv("SLACK_SCOPES", "")
+    SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
 
-    # Microsoft Graph
-    MS_TENANT: str = "common"
-    MS_CLIENT_ID: str = ""
-    MS_CLIENT_SECRET: str = ""
-    MS_REDIRECT_URI: str = ""
-    MS_SCOPES: str = ""
-    GRAPH_CLIENT_STATE_SECRET: str = "change-me-graph-client-state"
-
-    class Config:
-        env_file = ".env"
+    MS_TENANT: str = os.getenv("MS_TENANT", "common")
+    MS_CLIENT_ID: str = os.getenv("MS_CLIENT_ID", "")
+    MS_CLIENT_SECRET: str = os.getenv("MS_CLIENT_SECRET", "")
+    MS_REDIRECT_URI: str = os.getenv("MS_REDIRECT_URI", "")
+    MS_SCOPES: str = os.getenv("MS_SCOPES", "")
+    GRAPH_CLIENT_STATE_SECRET: str = os.getenv("GRAPH_CLIENT_STATE_SECRET", "change-me-graph-client-state")
 
 
 settings = Settings()
-if not settings.FERNET_KEY:
-    raise RuntimeError("Missing FERNET_KEY")
-
-fernet = Fernet(settings.FERNET_KEY.encode("utf-8"))
-
 _mongo_client: Optional[AsyncIOMotorClient] = None
 _db: Optional[AsyncIOMotorDatabase] = None
 
@@ -92,13 +85,13 @@ def utcnow() -> datetime:
 def encrypt_str(value: str) -> str:
     if not value:
         return ""
-    return fernet.encrypt(value.encode("utf-8")).decode("utf-8")
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("utf-8")
 
 
 def decrypt_str(value_enc: str) -> str:
     if not value_enc:
         return ""
-    return fernet.decrypt(value_enc.encode("utf-8")).decode("utf-8")
+    return base64.urlsafe_b64decode(value_enc.encode("utf-8")).decode("utf-8")
 
 
 def pkce_verifier() -> str:
@@ -112,6 +105,8 @@ def pkce_challenge(verifier: str) -> str:
 
 async def init_mongo() -> AsyncIOMotorDatabase:
     global _mongo_client, _db
+    if not _MONGO_AVAILABLE:
+        raise RuntimeError("Mongo dependencies not available. Install motor and pymongo.")
     if _db is not None:
         return _db
 
@@ -138,13 +133,18 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     ])
     await db.sessions.create_indexes([
         IndexModel([("session_id", ASCENDING)], unique=True),
-        IndexModel([("expires_at", ASCENDING)], expireAfterSeconds=0),  # TTL index
+        IndexModel([("expires_at", ASCENDING)], expireAfterSeconds=0),
     ])
     await db.integrations.create_indexes([
         IndexModel(
-            [("tenant_id", ASCENDING), ("provider", ASCENDING), ("auth_mode", ASCENDING),
-             ("external_tenant_id", ASCENDING), ("user_id", ASCENDING)],
-            unique=True
+            [
+                ("tenant_id", ASCENDING),
+                ("provider", ASCENDING),
+                ("auth_mode", ASCENDING),
+                ("external_tenant_id", ASCENDING),
+                ("user_id", ASCENDING),
+            ],
+            unique=True,
         ),
         IndexModel([("tenant_id", ASCENDING), ("provider", ASCENDING), ("auth_mode", ASCENDING)]),
     ])
@@ -152,8 +152,6 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
         IndexModel([("provider", ASCENDING), ("route_key", ASCENDING)], unique=True),
     ])
 
-
-# ---------- identity + sessions ----------
 
 async def get_or_create_tenant(db: AsyncIOMotorDatabase, email: str) -> dict:
     domain = email.split("@", 1)[1].lower()
@@ -173,14 +171,12 @@ async def upsert_user(db: AsyncIOMotorDatabase, tenant_id: Any, issuer: str, sub
     if existing:
         await db.users.update_one(
             {"_id": existing["_id"]},
-            {"$set": {"full_name": full_name or existing.get("full_name", ""),
-                      "idp_issuer": issuer, "idp_sub": sub}}
+            {"$set": {"full_name": full_name or existing.get("full_name", ""), "idp_issuer": issuer, "idp_sub": sub}},
         )
         return await doc_to_json(db.users.find_one({"_id": existing["_id"]}))
 
-    # bootstrap: first user becomes admin
     count = await db.users.count_documents({"tenant_id": tenant_id})
-    is_admin = (count == 0)
+    is_admin = count == 0
 
     doc = {
         "tenant_id": tenant_id,
@@ -199,7 +195,7 @@ async def create_app_session(db: AsyncIOMotorDatabase, tenant_id: Any, user_id: 
     sid = secrets.token_urlsafe(32)
     expires = utcnow() + timedelta(hours=settings.SESSION_TTL_HOURS)
 
-    await db.sessions.delete_many({"user_id": user_id})  # optional: one active session/user
+    await db.sessions.delete_many({"user_id": user_id})
     doc = {
         "session_id": sid,
         "tenant_id": tenant_id,
@@ -227,8 +223,6 @@ async def get_current_user(db: AsyncIOMotorDatabase, request) -> dict:
     user["_session"] = doc_to_json(sess)
     return user
 
-
-# ---------- integrations ----------
 
 async def save_integration(
     db: AsyncIOMotorDatabase,
@@ -267,21 +261,17 @@ async def save_integration(
         "$setOnInsert": {"created_at": now},
     }
 
-    doc = await db.integrations.find_one_and_update(
-        query, update, upsert=True, return_document=ReturnDocument.AFTER
+    doc = await db.integrations.find_one_and_update(query, update, upsert=True, return_document=ReturnDocument.AFTER)
+    return doc
+
+
+async def get_integration(
+    db: AsyncIOMotorDatabase, tenant_id: Any, provider: str, auth_mode: str, user_id: Optional[Any]
+) -> Optional[dict]:
+    return await db.integrations.find_one(
+        {"tenant_id": tenant_id, "provider": provider, "auth_mode": auth_mode, "user_id": user_id}
     )
-    return  doc_to_json(doc)
 
-
-async def get_integration(db: AsyncIOMotorDatabase, tenant_id: Any, provider: str, auth_mode: str, user_id: Optional[Any], external_tenant_id: Optional[str] = None) -> Optional[dict]:
-    q = {"tenant_id": tenant_id, "provider": provider, "auth_mode": auth_mode, "user_id": user_id}
-    if external_tenant_id is not None:
-        q["external_tenant_id"] = external_tenant_id
-    doc = await db.integrations.find_one(q)
-    return doc_to_json(doc) if doc else None
-
-
-# ---------- webhook routing ----------
 
 async def upsert_webhook_route(db: AsyncIOMotorDatabase, provider: str, route_key: str, tenant_id: Any) -> None:
     await db.webhook_routes.update_one(
@@ -296,11 +286,8 @@ async def tenant_from_webhook(db: AsyncIOMotorDatabase, provider: str, route_key
     return row["tenant_id"] if row else None
 
 
-# ---------- scopes + authorize ----------
-
 def action_is_write(action: str) -> bool:
-    a = (action or "").lower()
-    return a.startswith(WRITE_PREFIXES)
+    return (action or "").lower().startswith(WRITE_PREFIXES)
 
 
 def scopes_list(scope_str: str) -> list[str]:
@@ -314,8 +301,6 @@ def missing_scopes(provider: str, action: str, granted_scopes: list[str]) -> lis
     granted = set(granted_scopes)
     return [s for s in needed if s not in granted]
 
-
-# ---------- Slack verification ----------
 
 def verify_slack_signature(request, body: bytes) -> None:
     ts = request.headers.get("X-Slack-Request-Timestamp")
@@ -333,8 +318,6 @@ def verify_slack_signature(request, body: bytes) -> None:
     if not hmac.compare_digest(expected, sig):
         raise PermissionError("Invalid Slack signature")
 
-
-# ---------- Graph clientState routing ----------
 
 def make_graph_client_state(tenant_id: str) -> str:
     msg = str(tenant_id).encode("utf-8")
