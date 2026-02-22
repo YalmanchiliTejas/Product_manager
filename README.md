@@ -126,6 +126,10 @@ This mirrors the Cursor paradigm: the AI conversation IS the workspace, with str
 - **Opportunity briefs as Markdown**
 - **Copy to clipboard** (formatted for Notion, Google Docs, Slack)
 - **Raw JSON export** for programmatic use
+
+#### 4.6 Context and Knowledge graphs:
+- **Build longitudinal memory and context to make proper correlations and knowledge to come up with PRDS**
+
  
 ### What's OUT of MVP
 - Audio/video transcription (users pre-transcribe or use Otter/Gong)
