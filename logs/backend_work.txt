@@ -1,0 +1,1 @@
+Done with setting up supabase and setting up the backend code
