@@ -1,4 +1,11 @@
-import type { IdPName, IntegrationName, IntegrationState, SessionContext } from "./types";
+import type {
+  IdPName,
+  IntegrationName,
+  IntegrationState,
+  SessionContext,
+  WorkflowRequest,
+  WorkflowRun,
+} from "./types";
 
 const API = "http://localhost:8000";
 
@@ -22,18 +29,56 @@ export async function login(payload: {
   const res = await fetch(`${API}/auth/sso/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error("Login failed");
   return res.json();
 }
 
-export async function connectIntegration(sessionId: string, orgDomain: string, integration: IntegrationName) {
-  const res = await fetch(`${API}/org/integrations/admin/connect?session_id=${sessionId}`, {
+export async function connectIntegration(
+  sessionId: string,
+  orgDomain: string,
+  integration: IntegrationName
+) {
+  const res = await fetch(
+    `${API}/org/integrations/admin/connect?session_id=${sessionId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ org_domain: orgDomain, integration, scopes: [] }),
+    }
+  );
+  if (!res.ok) throw new Error("Connect failed");
+  return res.json();
+}
+
+export async function startWorkflow(
+  payload: WorkflowRequest
+): Promise<WorkflowRun> {
+  const res = await fetch(`${API}/multi-agent/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ org_domain: orgDomain, integration, scopes: [] })
+    body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error("Connect failed");
+  if (!res.ok) throw new Error("Workflow start failed");
+  return res.json();
+}
+
+export async function getWorkflowRun(runId: string): Promise<WorkflowRun> {
+  const res = await fetch(`${API}/multi-agent/runs/${runId}`);
+  if (!res.ok) throw new Error("Failed to fetch run");
+  return res.json();
+}
+
+export async function ingestFeedback(
+  runId: string,
+  notes: string[]
+): Promise<{ run: WorkflowRun; status: string }> {
+  const res = await fetch(`${API}/multi-agent/interviews/ingest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_id: runId, notes }),
+  });
+  if (!res.ok) throw new Error("Feedback ingest failed");
   return res.json();
 }

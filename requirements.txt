@@ -2,3 +2,6 @@ fastapi
 uvicorn
 motor
 pymongo
+anthropic
+openai
+httpx

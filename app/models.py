@@ -69,12 +69,52 @@ class IntegrationStatus(BaseModel):
     user_connected: bool
     user_scopes: List[str]
 
+
+# ---------- Multi-agent workflow models ----------
+
+
+class SlackSourceConfig(BaseModel):
+    """Configuration for pulling context from Slack."""
+    channel_ids: List[str] = Field(default_factory=list)
+    thread_refs: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description='List of {"channel": "C...", "thread_ts": "1234.5678"}',
+    )
+    search_queries: List[str] = Field(default_factory=list)
+
+
+class ConfluenceSourceConfig(BaseModel):
+    """Configuration for pulling context from Confluence."""
+    page_ids: List[str] = Field(default_factory=list)
+    search_queries: List[str] = Field(default_factory=list)
+    space_keys: List[str] = Field(default_factory=list)
+    labels: List[str] = Field(default_factory=list)
+
+
+class DesignInput(BaseModel):
+    """Design input for the design-reasoner agent."""
+    descriptions: List[str] = Field(
+        default_factory=list,
+        description="Text-based design descriptions, user flow specs, wireframe descriptions",
+    )
+    image_base64: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description='List of {"data": "base64...", "media_type": "image/png"}',
+    )
+
+
 class MultiAgentStartRequest(BaseModel):
     session_id: str
     product_name: str
-    documents: List[str] = Field(default_factory=list)
+    documents: List[str] = Field(default_factory=list, description="Raw text documents to ingest")
     interview_notes: List[str] = Field(default_factory=list)
     target_integrations: List[str] = Field(default_factory=lambda: ["jira", "slack"])
+    slack_sources: Optional[SlackSourceConfig] = None
+    confluence_sources: Optional[ConfluenceSourceConfig] = None
+    design_input: Optional[DesignInput] = None
+    stakeholder_roles: List[str] = Field(
+        default_factory=lambda: ["End User", "Engineering Lead", "Product Manager", "Designer"],
+    )
 
 
 class InterviewIngestRequest(BaseModel):
@@ -82,9 +122,14 @@ class InterviewIngestRequest(BaseModel):
     notes: List[str] = Field(default_factory=list)
 
 
+class SourceFetchRequest(BaseModel):
+    """Request to fetch context from connected integrations."""
+    session_id: str
+    slack_sources: Optional[SlackSourceConfig] = None
+    confluence_sources: Optional[ConfluenceSourceConfig] = None
 
 
-# ---------- In-memory onboarding models (current FastAPI app/tests) ----------
+# ---------- In-memory onboarding models ----------
 
 SUPPORTED_IDENTITY_PROVIDERS = ("okta", "google", "microsoft", "saml")
 SUPPORTED_INTEGRATIONS = ("jira", "confluence", "slack", "teams")

@@ -1,18 +1,34 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from .agents import (
+    ContextArchitect,
+    DeliveryPlanner,
+    DesignReasoner,
+    PRDWriter,
+    ResearchOps,
+)
+from .integrations import ConfluenceClient, SlackClient
+from .llm import ImageInput, create_provider
+from .llm.base import LLMProvider
 from .models import (
     ActionRequest,
     AdminConnectRequest,
+    ConfluenceSourceConfig,
+    DesignInput,
     IntegrationConnectionState,
+    SlackSourceConfig,
     SSOLoginRequest,
     SUPPORTED_IDENTITY_PROVIDERS,
     SUPPORTED_INTEGRATIONS,
     SessionContext,
 )
+
+logger = logging.getLogger(__name__)
 
 WRITE_PREFIXES = ("create", "comment", "edit", "post", "dm")
 READ_SCOPES = {
@@ -24,13 +40,33 @@ READ_SCOPES = {
 
 
 class PlatformService:
-    """In-memory orchestration service used by API routes and unit tests."""
+    """Orchestration service that connects SSO, integrations, and the AI agent pipeline.
 
-    def __init__(self) -> None:
+    The service manages two concerns:
+    1. Auth & integrations (SSO login, org integration connect, consent)
+    2. Multi-agent workflow (context ingestion -> research -> PRD -> design -> delivery)
+
+    When an LLM provider is available, agents make real AI calls.
+    When no provider is configured (e.g. in tests), agents fall back to
+    deterministic mock behavior so the pipeline shape is always testable.
+    """
+
+    def __init__(self, llm: LLMProvider | None = None) -> None:
         self._sessions: dict[str, SessionContext] = {}
         self._org_integrations: dict[str, dict[str, IntegrationConnectionState]] = {}
         self._user_consents: dict[tuple[str, str], bool] = {}
         self._workflow_runs: dict[str, dict[str, Any]] = {}
+
+        # LLM provider — None means use deterministic fallback (for tests)
+        self._llm = llm
+
+        # Integration clients — initialized lazily when tokens are available
+        self._slack: SlackClient | None = None
+        self._confluence: ConfluenceClient | None = None
+
+    # ------------------------------------------------------------------
+    # Auth & integrations (unchanged from original)
+    # ------------------------------------------------------------------
 
     def supported_identity_providers(self) -> list[str]:
         return list(SUPPORTED_IDENTITY_PROVIDERS)
@@ -115,6 +151,53 @@ class PlatformService:
             raise ValueError(f"Unsupported integration: {integration}")
         self._user_consents[(session_id, normalized)] = True
 
+    # ------------------------------------------------------------------
+    # Source context fetching (new — pulls from real Slack/Confluence)
+    # ------------------------------------------------------------------
+
+    def fetch_source_context(
+        self,
+        session_id: str,
+        slack_sources: SlackSourceConfig | None = None,
+        confluence_sources: ConfluenceSourceConfig | None = None,
+    ) -> dict[str, Any]:
+        """Fetch documents from connected integrations for agent consumption."""
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError("Invalid session")
+
+        documents: list[str] = []
+        sources_used: list[str] = []
+
+        if slack_sources and self._slack:
+            slack_docs = self._slack.fetch_context_for_agent(
+                channel_ids=slack_sources.channel_ids,
+                thread_refs=slack_sources.thread_refs,
+                search_queries=slack_sources.search_queries,
+            )
+            documents.extend(slack_docs)
+            sources_used.append(f"slack:{len(slack_docs)} documents")
+
+        if confluence_sources and self._confluence:
+            conf_docs = self._confluence.fetch_context_for_agent(
+                page_ids=confluence_sources.page_ids,
+                search_queries=confluence_sources.search_queries,
+                space_keys=confluence_sources.space_keys,
+                labels=confluence_sources.labels,
+            )
+            documents.extend(conf_docs)
+            sources_used.append(f"confluence:{len(conf_docs)} documents")
+
+        return {
+            "documents": documents,
+            "sources_used": sources_used,
+            "total_documents": len(documents),
+        }
+
+    # ------------------------------------------------------------------
+    # Multi-agent workflow
+    # ------------------------------------------------------------------
+
     def start_multi_agent_workflow(
         self,
         session_id: str,
@@ -122,6 +205,10 @@ class PlatformService:
         documents: list[str],
         interview_notes: list[str],
         target_integrations: Optional[list[str]] = None,
+        slack_sources: Optional[SlackSourceConfig] = None,
+        confluence_sources: Optional[ConfluenceSourceConfig] = None,
+        design_input: Optional[DesignInput] = None,
+        stakeholder_roles: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         session = self._sessions.get(session_id)
         if not session:
@@ -129,6 +216,12 @@ class PlatformService:
 
         normalized_docs = [d.strip() for d in documents if d and d.strip()]
         normalized_feedback = [n.strip() for n in interview_notes if n and n.strip()]
+
+        # Pull additional docs from connected integrations
+        if slack_sources or confluence_sources:
+            fetched = self.fetch_source_context(session_id, slack_sources, confluence_sources)
+            normalized_docs.extend(fetched["documents"])
+
         run_id = secrets.token_urlsafe(10)
 
         pipeline = self._execute_agent_pipeline(
@@ -136,6 +229,8 @@ class PlatformService:
             documents=normalized_docs,
             feedback=normalized_feedback,
             target_integrations=target_integrations or ["jira", "slack"],
+            design_input=design_input,
+            stakeholder_roles=stakeholder_roles,
         )
         run = {
             "run_id": run_id,
@@ -145,6 +240,7 @@ class PlatformService:
             "rlms_context": pipeline["rlms_context"],
             "interview_plan": pipeline["interview_plan"],
             "prd": pipeline["prd"],
+            "design_analysis": pipeline.get("design_analysis"),
             "tickets": pipeline["tickets"],
             "distribution": pipeline["distribution"],
             "pm_ops": self._pm_operations_checklist(),
@@ -153,6 +249,8 @@ class PlatformService:
             "orchestration": pipeline["orchestration"],
             "_source_documents": normalized_docs,
             "_source_feedback": normalized_feedback,
+            "_design_input": design_input,
+            "_stakeholder_roles": stakeholder_roles,
         }
         self._workflow_runs[run_id] = run
         return self._public_run(run)
@@ -178,14 +276,199 @@ class PlatformService:
             documents=run.get("_source_documents", []),
             feedback=updated_feedback,
             target_integrations=[item.get("integration", "jira") for item in run.get("distribution", [])],
+            design_input=run.get("_design_input"),
+            stakeholder_roles=run.get("_stakeholder_roles"),
         )
         run["rlms_context"] = pipeline["rlms_context"]
         run["interview_plan"] = pipeline["interview_plan"]
         run["tickets"] = pipeline["tickets"]
         run["prd"] = pipeline["prd"]
+        run["design_analysis"] = pipeline.get("design_analysis")
         run["distribution"] = pipeline["distribution"]
         run["orchestration"] = pipeline["orchestration"]
         return self._public_run(run)
+
+    # ------------------------------------------------------------------
+    # Pipeline execution
+    # ------------------------------------------------------------------
+
+    def _execute_agent_pipeline(
+        self,
+        product_name: str,
+        documents: list[str],
+        feedback: list[str],
+        target_integrations: list[str],
+        design_input: Optional[DesignInput] = None,
+        stakeholder_roles: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        steps: list[dict[str, Any]] = []
+        started_at = self._now_iso()
+
+        if self._llm:
+            return self._execute_llm_pipeline(
+                product_name=product_name,
+                documents=documents,
+                feedback=feedback,
+                target_integrations=target_integrations,
+                design_input=design_input,
+                stakeholder_roles=stakeholder_roles,
+                steps=steps,
+                started_at=started_at,
+            )
+        else:
+            return self._execute_fallback_pipeline(
+                product_name=product_name,
+                documents=documents,
+                feedback=feedback,
+                target_integrations=target_integrations,
+                steps=steps,
+                started_at=started_at,
+            )
+
+    def _execute_llm_pipeline(
+        self,
+        product_name: str,
+        documents: list[str],
+        feedback: list[str],
+        target_integrations: list[str],
+        design_input: Optional[DesignInput],
+        stakeholder_roles: Optional[list[str]],
+        steps: list[dict[str, Any]],
+        started_at: str,
+    ) -> dict[str, Any]:
+        """Run the full agent pipeline with real LLM calls."""
+
+        # 1. Context Architect — RLMS recursive summarization
+        context_agent = ContextArchitect(self._llm)
+        ctx_result = context_agent.run(documents=documents, feedback=feedback)
+        rlms_context = ctx_result.output
+        steps.append(ctx_result.to_dict())
+
+        global_summary = rlms_context.get("global_summary", "")
+        feedback_summary = rlms_context.get("feedback_summary", "")
+
+        # 2. Research Ops — interview planning and gap analysis
+        research_agent = ResearchOps(self._llm)
+        research_result = research_agent.run(
+            product_name=product_name,
+            context_summary=global_summary,
+            existing_feedback=feedback,
+            stakeholder_roles=stakeholder_roles,
+        )
+        interview_plan = research_result.output
+        steps.append(research_result.to_dict())
+
+        # 3. Design Reasoner — analyze designs if provided
+        design_analysis = None
+        if design_input and (design_input.descriptions or design_input.image_base64):
+            design_agent = DesignReasoner(self._llm)
+            images = [
+                ImageInput.from_base64(img["data"], img.get("media_type", "image/png"))
+                for img in design_input.image_base64
+            ] if design_input.image_base64 else []
+            design_result = design_agent.run(
+                product_name=product_name,
+                context_summary=global_summary,
+                design_descriptions=design_input.descriptions,
+                design_images=images,
+            )
+            design_analysis = design_result.output
+            steps.append(design_result.to_dict())
+
+        # 4. PRD Writer — generate the PRD with reasoning
+        prd_agent = PRDWriter(self._llm)
+        prd_result = prd_agent.run(
+            product_name=product_name,
+            context_summary=global_summary,
+            feedback_summary=feedback_summary,
+            research_insights=interview_plan,
+            design_analysis=design_analysis,
+        )
+        prd = prd_result.output.get("prd", {})
+        steps.append(prd_result.to_dict())
+
+        # 5. Delivery Planner — convert PRD to tickets
+        delivery_agent = DeliveryPlanner(self._llm)
+        delivery_result = delivery_agent.run(
+            product_name=product_name,
+            prd=prd,
+            target_integrations=target_integrations,
+        )
+        tickets = delivery_result.output.get("tickets", [])
+        distribution = delivery_result.output.get("distribution", [])
+        steps.append(delivery_result.to_dict())
+
+        orchestration = {
+            "strategy": "llm-powered staged planner",
+            "started_at": started_at,
+            "completed_at": self._now_iso(),
+            "steps": [
+                {"agent": s["agent"], "status": s["status"], "output": list(s.get("output", {}).keys()) if isinstance(s.get("output"), dict) else s.get("output", "")}
+                for s in steps
+            ],
+            "total_token_usage": self._merge_token_usage(steps),
+        }
+
+        return {
+            "rlms_context": rlms_context,
+            "interview_plan": interview_plan,
+            "prd": prd,
+            "design_analysis": design_analysis,
+            "tickets": tickets,
+            "distribution": distribution,
+            "orchestration": orchestration,
+        }
+
+    def _execute_fallback_pipeline(
+        self,
+        product_name: str,
+        documents: list[str],
+        feedback: list[str],
+        target_integrations: list[str],
+        steps: list[dict[str, Any]],
+        started_at: str,
+    ) -> dict[str, Any]:
+        """Deterministic fallback when no LLM is configured (tests, CI)."""
+        rlms_context = self._rlms_recursive_context(documents, feedback)
+        steps.append({"agent": "context-architect", "status": "completed", "output": "rlms_context"})
+
+        interview_plan = self._interview_plan()
+        steps.append({"agent": "research-ops", "status": "completed", "output": "interview_plan"})
+
+        prd = self._generate_prd(product_name, rlms_context)
+        steps.append({"agent": "prd-writer", "status": "completed", "output": "prd"})
+
+        tickets = self._convert_prd_to_tickets(product_name)
+        distribution = self._distribute_tickets(target_integrations, tickets)
+        steps.append({"agent": "delivery-planner", "status": "completed", "output": "tickets+distribution"})
+
+        orchestration = {
+            "strategy": "openclaw-style staged planner",
+            "started_at": started_at,
+            "completed_at": self._now_iso(),
+            "steps": steps,
+        }
+
+        return {
+            "rlms_context": rlms_context,
+            "interview_plan": interview_plan,
+            "prd": prd,
+            "design_analysis": None,
+            "tickets": tickets,
+            "distribution": distribution,
+            "orchestration": orchestration,
+        }
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _merge_token_usage(self, steps: list[dict[str, Any]]) -> dict[str, int]:
+        merged: dict[str, int] = {}
+        for step in steps:
+            for k, v in step.get("token_usage", {}).items():
+                merged[k] = merged.get(k, 0) + v
+        return merged
 
     def _empty_org_integrations(self, org_domain: str) -> dict[str, IntegrationConnectionState]:
         return {
@@ -198,6 +481,8 @@ class PlatformService:
             )
             for name in SUPPORTED_INTEGRATIONS
         }
+
+    # -- Fallback methods (used when no LLM is available) --
 
     def _rlms_recursive_context(self, documents: list[str], feedback: list[str]) -> dict[str, Any]:
         chunks = self._chunk_documents(documents, chunk_size=700)
@@ -291,56 +576,17 @@ class PlatformService:
             "fine_tuning_note": "Start with retrieval + evaluators; fine-tune specialist models after collecting high-quality traces.",
         }
 
-
     def _agent_plan(self) -> list[dict[str, str]]:
         return [
             {"agent": "context-architect", "goal": "Chunk and recursively compress long documents to controllable context."},
             {"agent": "research-ops", "goal": "Send interview prompts, collect feedback, and normalize insights."},
             {"agent": "prd-writer", "goal": "Synthesize a PM-ready PRD draft with goals, non-goals, and metrics."},
+            {"agent": "design-reasoner", "goal": "Analyze design mockups and specs for UX quality, accessibility, and PRD alignment."},
             {"agent": "delivery-planner", "goal": "Convert PRD outcomes into tickets and distribute them to tools."},
         ]
 
     def _public_run(self, run: dict[str, Any]) -> dict[str, Any]:
         return {k: v for k, v in run.items() if not k.startswith("_")}
-
-    def _execute_agent_pipeline(
-        self,
-        product_name: str,
-        documents: list[str],
-        feedback: list[str],
-        target_integrations: list[str],
-    ) -> dict[str, Any]:
-        steps: list[dict[str, Any]] = []
-        started_at = self._now_iso()
-
-        rlms_context = self._rlms_recursive_context(documents, feedback)
-        steps.append({"agent": "context-architect", "status": "completed", "output": "rlms_context"})
-
-        interview_plan = self._interview_plan()
-        steps.append({"agent": "research-ops", "status": "completed", "output": "interview_plan"})
-
-        prd = self._generate_prd(product_name, rlms_context)
-        steps.append({"agent": "prd-writer", "status": "completed", "output": "prd"})
-
-        tickets = self._convert_prd_to_tickets(product_name)
-        distribution = self._distribute_tickets(target_integrations, tickets)
-        steps.append({"agent": "delivery-planner", "status": "completed", "output": "tickets+distribution"})
-
-        orchestration = {
-            "strategy": "openclaw-style staged planner",
-            "started_at": started_at,
-            "completed_at": self._now_iso(),
-            "steps": steps,
-        }
-
-        return {
-            "rlms_context": rlms_context,
-            "interview_plan": interview_plan,
-            "prd": prd,
-            "tickets": tickets,
-            "distribution": distribution,
-            "orchestration": orchestration,
-        }
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
