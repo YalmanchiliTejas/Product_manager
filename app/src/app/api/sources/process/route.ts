@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/app/lib/supabaseAdmin";
 import { createEmbedding, toPgVectorLiteral } from "@/app/lib/embeddings";
-import { chunkText, extractSourceText } from "@/app/lib/sourcePipeline";
+import { chunkText, extractSourceText, mapWithConcurrency } from "@/app/lib/sourcePipeline";
 
 type ProcessBody = {
   source_id?: string;
@@ -24,7 +24,7 @@ export async function POST(request: Request) {
 
   const { data: source, error: sourceError } = await supabaseAdmin
     .from("sources")
-    .select("id, project_id, raw_content, file_path, metadata")
+    .select("id, project_id, source_type, segment_tags, raw_content, file_path, metadata")
     .eq("id", sourceId)
     .maybeSingle();
 
@@ -46,8 +46,7 @@ export async function POST(request: Request) {
 
     await supabaseAdmin.from("chunks").delete().eq("source_id", source.id);
 
-    const chunkRows = await Promise.all(
-      chunks.map(async (content, chunkIndex) => {
+    const chunkRows = await mapWithConcurrency(chunks, 4, async (content, chunkIndex) => {
         const embedding = await createEmbedding(content);
 
         return {
@@ -57,11 +56,12 @@ export async function POST(request: Request) {
           embedding: toPgVectorLiteral(embedding),
           metadata: {
             project_id: source.project_id,
+            source_type: source.source_type,
+            segment_tags: source.segment_tags ?? [],
             ...(source.metadata ?? {}),
           },
         };
-      })
-    );
+      });
 
     const { error: chunkInsertError } = await supabaseAdmin.from("chunks").insert(chunkRows);
 
