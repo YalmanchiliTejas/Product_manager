@@ -24,6 +24,32 @@ export function chunkText(text: string, chunkSize = 1200, overlap = 150): string
   return chunks;
 }
 
+export async function mapWithConcurrency<T, U>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<U>
+): Promise<U[]> {
+  const limit = Math.max(1, concurrency);
+  const results = new Array<U>(items.length);
+  let cursor = 0;
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+
+      if (index >= items.length) {
+        return;
+      }
+
+      results[index] = await mapper(items[index], index);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
 export async function extractSourceText(rawContent: string | null, filePath: string | null) {
   if (rawContent?.trim()) {
     return rawContent;

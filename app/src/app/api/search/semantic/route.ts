@@ -6,6 +6,8 @@ type SearchBody = {
   query?: string;
   project_id?: string;
   match_count?: number;
+  source_types?: string[];
+  segment_tags?: string[];
 };
 
 export async function POST(request: Request) {
@@ -20,6 +22,12 @@ export async function POST(request: Request) {
   const query = body.query?.trim();
   const projectId = body.project_id?.trim();
   const matchCount = Math.min(Math.max(body.match_count ?? 8, 1), 50);
+  const sourceTypes = Array.isArray(body.source_types)
+    ? body.source_types.map((type) => type.trim()).filter(Boolean)
+    : [];
+  const segmentTags = Array.isArray(body.segment_tags)
+    ? body.segment_tags.map((tag) => tag.trim()).filter(Boolean)
+    : [];
 
   if (!query) {
     return NextResponse.json({ error: "query is required." }, { status: 400 });
@@ -36,6 +44,8 @@ export async function POST(request: Request) {
       input_project_id: projectId,
       query_embedding: toPgVectorLiteral(embedding),
       match_count: matchCount,
+      filter_source_types: sourceTypes.length ? sourceTypes : null,
+      filter_segment_tags: segmentTags.length ? segmentTags : null,
     });
 
     if (error) {
