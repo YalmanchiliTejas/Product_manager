@@ -39,7 +39,18 @@ export async function extractSourceText(rawContent: string | null, filePath: str
     return buffer.toString("utf8");
   }
 
+  if (filePath.endsWith(".json")) {
+    // Flatten JSON to plain text so it can be chunked and embedded.
+    // Arrays of objects (e.g. support-ticket exports) are joined as
+    // newline-delimited entries so each record stays coherent after chunking.
+    const parsed: unknown = JSON.parse(buffer.toString("utf8"));
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => JSON.stringify(item)).join("\n");
+    }
+    return JSON.stringify(parsed, null, 2);
+  }
+
   throw new Error(
-    "Unsupported file type for extraction. Supported: .txt, .md, .csv or provide raw_content."
+    "Unsupported file type. Supported: .txt, .md, .csv, .json or provide raw_content."
   );
 }
