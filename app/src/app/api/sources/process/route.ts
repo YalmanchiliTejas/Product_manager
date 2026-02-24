@@ -46,22 +46,29 @@ export async function POST(request: Request) {
 
     await supabaseAdmin.from("chunks").delete().eq("source_id", source.id);
 
-    const chunkRows = await Promise.all(
-      chunks.map(async (content, chunkIndex) => {
-        const embedding = await createEmbedding(content);
+    // Embed chunks sequentially to avoid OpenAI rate-limit bursts.
+    const chunkRows: Array<{
+      source_id: string;
+      project_id: string;
+      content: string;
+      chunk_index: number;
+      embedding: string;
+      metadata: Record<string, unknown>;
+    }> = [];
 
-        return {
-          source_id: source.id,
-          content,
-          chunk_index: chunkIndex,
-          embedding: toPgVectorLiteral(embedding),
-          metadata: {
-            project_id: source.project_id,
-            ...(source.metadata ?? {}),
-          },
-        };
-      })
-    );
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+      const content = chunks[chunkIndex];
+      const embedding = await createEmbedding(content);
+
+      chunkRows.push({
+        source_id: source.id,
+        project_id: source.project_id,
+        content,
+        chunk_index: chunkIndex,
+        embedding: toPgVectorLiteral(embedding),
+        metadata: source.metadata ?? {},
+      });
+    }
 
     const { error: chunkInsertError } = await supabaseAdmin.from("chunks").insert(chunkRows);
 
