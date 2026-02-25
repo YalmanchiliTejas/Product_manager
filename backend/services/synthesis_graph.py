@@ -36,11 +36,11 @@ Graph topology:
 import json
 from typing import TypedDict
 
-import anthropic
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
-from backend.config import settings
 from backend.db.supabase_client import get_supabase
+from backend.services.llm import get_fast_llm, get_strong_llm
 from backend.services.semantic_search import semantic_search
 from backend.services.synthesis import (
     _OPPORTUNITY_SYSTEM_PROMPT,
@@ -98,7 +98,7 @@ def extract_themes_node(state: SynthesisState) -> dict:
     On drill-down iterations (iteration > 0), existing theme titles are passed
     as context so the model extends rather than duplicates known themes.
     """
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    llm = get_fast_llm()
     chunks = state["chunks"]
     batches = _batch_chunks(chunks)
     all_raw_themes: list[dict] = []
@@ -121,13 +121,11 @@ def extract_themes_node(state: SynthesisState) -> dict:
             f"{chunk_block}\n\n"
             f"Extract the key themes from this research."
         )
-        response = client.messages.create(
-            model=settings.fast_model,
-            max_tokens=4096,
-            system=_THEME_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        parsed = _parse_json_response(response.content[0].text)
+        response = llm.invoke([
+            SystemMessage(content=_THEME_SYSTEM_PROMPT),
+            HumanMessage(content=user_message),
+        ])
+        parsed = _parse_json_response(response.content)
         all_raw_themes.extend(parsed.get("themes", []))
 
     # Consolidation pass when multiple batches produced themes
@@ -137,13 +135,11 @@ def extract_themes_node(state: SynthesisState) -> dict:
             f"{len(batches)} batches of the same project. Merge duplicates.\n\n"
             f"Themes:\n{json.dumps(all_raw_themes, indent=2)}"
         )
-        response = client.messages.create(
-            model=settings.fast_model,
-            max_tokens=4096,
-            system=_THEME_CONSOLIDATION_PROMPT,
-            messages=[{"role": "user", "content": consolidation_message}],
-        )
-        parsed = _parse_json_response(response.content[0].text)
+        response = llm.invoke([
+            SystemMessage(content=_THEME_CONSOLIDATION_PROMPT),
+            HumanMessage(content=consolidation_message),
+        ])
+        parsed = _parse_json_response(response.content)
         all_raw_themes = parsed.get("themes", [])
 
     return {"themes": all_raw_themes}
@@ -277,14 +273,11 @@ def score_opportunities_node(state: SynthesisState) -> dict:
         f"Generate a prioritized list of product opportunities based on this research."
     )
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    response = client.messages.create(
-        model=settings.strong_model,
-        max_tokens=6144,
-        system=_OPPORTUNITY_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    parsed = _parse_json_response(response.content[0].text)
+    response = get_strong_llm().invoke([
+        SystemMessage(content=_OPPORTUNITY_SYSTEM_PROMPT),
+        HumanMessage(content=user_message),
+    ])
+    parsed = _parse_json_response(response.content)
     opportunities_raw = parsed.get("opportunities", [])
 
     if not opportunities_raw:

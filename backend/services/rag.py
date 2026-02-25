@@ -5,10 +5,12 @@ Steps:
                        from past sessions and inject them as context
   2. Semantic search — embed query, retrieve top-k chunks via pgvector
   3. Context assembly— format memory + chunks into a grounded evidence block
-  4. Generate        — call Anthropic with strict citation instructions
+  4. Generate        — call the configured strong LLM with strict citation instructions
   5. Post-process    — extract cited chunk IDs from the response text
   6. Memory store    — distil the conversation exchange into persistent memories
                        for future sessions (only when user_id is provided)
+
+The LLM is selected via the LLM_PROVIDER env var — no Anthropic-specific code here.
 
 Returns:
     {
@@ -21,9 +23,9 @@ Returns:
 
 import re
 
-import anthropic
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from backend.config import settings
+from backend.services.llm import get_strong_llm
 from backend.services.semantic_search import semantic_search
 
 _RAG_SYSTEM_PROMPT = """\
@@ -125,23 +127,23 @@ def run_rag_pipeline(
     # ------------------------------------------------------------------
     # 4. Build message list (prepend history, append augmented question)
     # ------------------------------------------------------------------
-    messages: list[dict] = []
+    lc_messages = [SystemMessage(content=_RAG_SYSTEM_PROMPT)]
     if conversation_history:
-        messages.extend(conversation_history)
-    messages.append({"role": "user", "content": augmented_user_message})
+        for msg in conversation_history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                lc_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                from langchain_core.messages import AIMessage
+                lc_messages.append(AIMessage(content=content))
+    lc_messages.append(HumanMessage(content=augmented_user_message))
 
     # ------------------------------------------------------------------
-    # 5. Generate with Anthropic
+    # 5. Generate with the configured strong LLM (provider-agnostic)
     # ------------------------------------------------------------------
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    response = client.messages.create(
-        model=settings.strong_model,
-        max_tokens=2048,
-        system=_RAG_SYSTEM_PROMPT,
-        messages=messages,
-    )
-
-    answer: str = response.content[0].text
+    response = get_strong_llm().invoke(lc_messages)
+    answer: str = response.content
 
     # ------------------------------------------------------------------
     # 6. Extract cited chunk IDs (UUIDs appearing after "chunk_id:")
@@ -158,7 +160,16 @@ def run_rag_pipeline(
     )
 
     # ------------------------------------------------------------------
-    # 7. Store this exchange as persistent memory for future sessions
+    # 7. Normalise usage metadata (provider-agnostic)
+    # ------------------------------------------------------------------
+    usage_meta = response.usage_metadata or {}
+    usage = {
+        "input_tokens": usage_meta.get("input_tokens", 0),
+        "output_tokens": usage_meta.get("output_tokens", 0),
+    }
+
+    # ------------------------------------------------------------------
+    # 8. Store this exchange as persistent memory for future sessions
     # ------------------------------------------------------------------
     if user_id:
         try:
@@ -183,8 +194,5 @@ def run_rag_pipeline(
             }
             for c in chunks
         ],
-        "usage": {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-        },
+        "usage": usage,
     }

@@ -5,6 +5,12 @@ mem0 handles:
   - Deduplicating and updating memories intelligently over time
   - Semantic retrieval of the most relevant memories for a given query
 
+Provider selection mirrors the rest of the backend — set LLM_PROVIDER and
+EMBEDDING_PROVIDER in your .env and memory automatically uses the same models.
+
+Supported LLM providers for mem0:  anthropic, openai, ollama, groq
+Supported embedding providers:     openai, ollama
+
 Storage backends:
   - If DATABASE_URL is set → pgvector in Supabase (persistent across restarts)
   - Otherwise             → local in-memory vector store (lost on restart)
@@ -25,9 +31,57 @@ from backend.config import settings
 
 _COLLECTION_NAME = "pm_agent_memories"
 
+# mem0 provider names may differ from our LLM_PROVIDER values; map them here.
+_LLM_PROVIDER_MAP: dict[str, str] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "ollama": "ollama",
+    "groq": "groq",
+    "azure_openai": "openai",  # mem0 doesn't have a distinct Azure provider; use openai
+}
+_EMBED_PROVIDER_MAP: dict[str, str] = {
+    "openai": "openai",
+    "ollama": "ollama",
+    "cohere": "huggingface",  # mem0 uses huggingface for Cohere-style models
+}
+
+
+def _build_llm_config() -> dict:
+    """Return the mem0 LLM config block for the active LLM_PROVIDER."""
+    provider = settings.llm_provider
+    mem0_provider = _LLM_PROVIDER_MAP.get(provider, provider)
+
+    cfg: dict = {"model": settings.fast_model}
+    if provider == "anthropic":
+        cfg["api_key"] = settings.anthropic_api_key
+    elif provider in ("openai", "azure_openai"):
+        cfg["api_key"] = settings.openai_api_key
+    elif provider == "groq":
+        cfg["api_key"] = settings.groq_api_key
+    elif provider == "ollama":
+        cfg["ollama_base_url"] = settings.ollama_base_url
+
+    return {"provider": mem0_provider, "config": cfg}
+
+
+def _build_embedder_config() -> dict:
+    """Return the mem0 embedder config block for the active EMBEDDING_PROVIDER."""
+    provider = settings.embedding_provider
+    mem0_provider = _EMBED_PROVIDER_MAP.get(provider, provider)
+
+    cfg: dict = {"model": settings.embedding_model}
+    if provider == "openai":
+        cfg["api_key"] = settings.openai_api_key
+    elif provider == "cohere":
+        cfg["api_key"] = settings.cohere_api_key
+    elif provider == "ollama":
+        cfg["ollama_base_url"] = settings.ollama_base_url
+
+    return {"provider": mem0_provider, "config": cfg}
+
 
 def _parse_db_url(url: str) -> dict:
-    """Parse a PostgreSQL connection string into mem0 pgvector config dict."""
+    """Parse a PostgreSQL connection string into mem0 pgvector config fields."""
     p = urllib.parse.urlparse(url)
     return {
         "host": p.hostname or "localhost",
@@ -40,28 +94,10 @@ def _parse_db_url(url: str) -> dict:
 
 @lru_cache(maxsize=1)
 def _get_mem0_client() -> Memory:
-    """Build and cache the mem0 Memory client.
-
-    Configured with:
-    - Anthropic claude-haiku for memory extraction (fast + cheap)
-    - OpenAI text-embedding-3-small for semantic retrieval (same as RAG chunks)
-    - pgvector (Supabase) if DATABASE_URL is set, else in-memory
-    """
+    """Build and cache the mem0 Memory client for the configured providers."""
     config: dict = {
-        "llm": {
-            "provider": "anthropic",
-            "config": {
-                "model": settings.fast_model,
-                "api_key": settings.anthropic_api_key,
-            },
-        },
-        "embedder": {
-            "provider": "openai",
-            "config": {
-                "model": settings.embedding_model,
-                "api_key": settings.openai_api_key,
-            },
-        },
+        "llm": _build_llm_config(),
+        "embedder": _build_embedder_config(),
     }
 
     if settings.database_url:
@@ -136,11 +172,7 @@ def search_memories(
 
 
 def get_all_memories(project_id: str, user_id: str) -> list[dict]:
-    """Fetch all stored memories for a project/user combination.
-
-    Returns:
-        List of memory records: [{id, memory, created_at, metadata}, ...]
-    """
+    """Fetch all stored memories for a project/user combination."""
     m = _get_mem0_client()
     result = m.get_all(user_id=user_id, agent_id=project_id)
     return result.get("results", []) if isinstance(result, dict) else result
