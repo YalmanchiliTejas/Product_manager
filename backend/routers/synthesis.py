@@ -1,4 +1,6 @@
-"""Synthesis router — theme extraction (Pass 1) and opportunity scoring (Pass 2)."""
+"""Synthesis router — theme extraction (Pass 1), opportunity scoring (Pass 2),
+and full LangGraph pipeline with recursive evidence drilling (/run).
+"""
 
 from fastapi import APIRouter, HTTPException
 
@@ -7,10 +9,13 @@ from backend.db.supabase_client import get_supabase
 from backend.schemas.models import (
     OpportunityScoringRequest,
     OpportunityScoringResponse,
+    SynthesisGraphRequest,
+    SynthesisGraphResponse,
     ThemeExtractionRequest,
     ThemeExtractionResponse,
 )
 from backend.services.synthesis import run_opportunity_scoring, run_theme_extraction
+from backend.services.synthesis_graph import run_synthesis_graph
 
 router = APIRouter(prefix="/api/synthesis", tags=["synthesis"])
 
@@ -104,4 +109,54 @@ def score_opportunities(body: OpportunityScoringRequest) -> OpportunityScoringRe
         synthesis_id=body.synthesis_id,
         opportunities=opportunities,
         opportunity_count=len(opportunities),
+    )
+
+
+@router.post(
+    "/run",
+    response_model=SynthesisGraphResponse,
+    summary=(
+        "Full LangGraph synthesis: themes + opportunities with recursive evidence drilling"
+    ),
+)
+def run_synthesis(body: SynthesisGraphRequest) -> SynthesisGraphResponse:
+    """Run the complete LangGraph synthesis pipeline in a single call.
+
+    Improvements over the individual /themes + /opportunities endpoints:
+
+    1. Recursive evidence drilling — weak themes (< 2 supporting chunks) trigger
+       a targeted semantic search for additional evidence, then re-run extraction.
+       Repeats up to `max_drill_down_iterations` times.
+
+    2. Stateful graph — LangGraph tracks state across all nodes, making the
+       pipeline inspectable and extensible.
+
+    3. Single request — themes and opportunities are produced in one atomic call,
+       removing the need to chain two separate API requests.
+
+    Set `max_drill_down_iterations=0` to replicate the original linear behaviour.
+    """
+    model_label = body.model_used or settings.fast_model
+    try:
+        synthesis_id = _create_synthesis_record(
+            body.project_id, body.source_ids, model_label
+        )
+        result = run_synthesis_graph(
+            project_id=body.project_id,
+            synthesis_id=synthesis_id,
+            source_ids=body.source_ids,
+            max_iterations=body.max_drill_down_iterations,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return SynthesisGraphResponse(
+        synthesis_id=synthesis_id,
+        themes=result["themes"],
+        opportunities=result["opportunities"],
+        iterations=result["iterations"],
+        theme_count=len(result["themes"]),
+        opportunity_count=len(result["opportunities"]),
     )

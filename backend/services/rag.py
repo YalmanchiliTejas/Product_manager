@@ -1,10 +1,14 @@
 """RAG (Retrieval-Augmented Generation) pipeline.
 
 Steps:
-  1. Semantic search  — embed query, retrieve top-k chunks via pgvector
-  2. Context assembly — format chunks into a grounded evidence block
-  3. Generate         — call Anthropic with strict citation instructions
-  4. Post-process     — extract cited chunk IDs from the response text
+  1. Memory recall   — if user_id is provided, retrieve relevant PM memories
+                       from past sessions and inject them as context
+  2. Semantic search — embed query, retrieve top-k chunks via pgvector
+  3. Context assembly— format memory + chunks into a grounded evidence block
+  4. Generate        — call Anthropic with strict citation instructions
+  5. Post-process    — extract cited chunk IDs from the response text
+  6. Memory store    — distil the conversation exchange into persistent memories
+                       for future sessions (only when user_id is provided)
 
 Returns:
     {
@@ -37,17 +41,21 @@ what additional data would help.
 def run_rag_pipeline(
     project_id: str,
     query: str,
+    user_id: str | None = None,
     conversation_history: list[dict] | None = None,
     match_count: int = 8,
     source_types: list[str] | None = None,
     segment_tags: list[str] | None = None,
 ) -> dict:
-    """Full RAG pipeline: query → embed → retrieve → augment → generate.
+    """Full RAG pipeline: memory recall → retrieve → augment → generate → remember.
 
     Args:
         project_id:           Project UUID to search within.
         query:                User question.
-        conversation_history: Prior turns as [{"role": "user"|"assistant", "content": str}, ...].
+        user_id:              PM user UUID. When provided:
+                              - Relevant memories from past sessions are injected.
+                              - This exchange is stored as memories for the future.
+        conversation_history: Prior turns as [{"role": "user"|"assistant", "content": str}].
         match_count:          Max chunks to retrieve (1–50).
         source_types:         Optional source type filter.
         segment_tags:         Optional segment tag filter.
@@ -56,7 +64,23 @@ def run_rag_pipeline(
         Dict with answer, citations, retrieved chunk metadata, and token usage.
     """
     # ------------------------------------------------------------------
-    # 1. Retrieve relevant chunks
+    # 1. Retrieve relevant memories from past sessions
+    # ------------------------------------------------------------------
+    memory_context = ""
+    if user_id:
+        try:
+            from backend.services.memory import search_memories
+            memories = search_memories(query, project_id, user_id, limit=4)
+            if memories:
+                memory_lines = "\n".join(f"- {m['memory']}" for m in memories)
+                memory_context = (
+                    f"Relevant PM knowledge from past sessions:\n{memory_lines}\n\n"
+                )
+        except Exception:
+            pass  # Memory retrieval failures must not break the RAG response
+
+    # ------------------------------------------------------------------
+    # 2. Retrieve relevant chunks via semantic search
     # ------------------------------------------------------------------
     chunks = semantic_search(
         project_id=project_id,
@@ -78,7 +102,7 @@ def run_rag_pipeline(
         }
 
     # ------------------------------------------------------------------
-    # 2. Build the evidence block
+    # 3. Build the evidence block (memory context + retrieved chunks)
     # ------------------------------------------------------------------
     evidence_parts = []
     for i, chunk in enumerate(chunks, start=1):
@@ -91,6 +115,7 @@ def run_rag_pipeline(
     evidence_block = "\n\n" + ("-" * 60) + "\n\n".join(evidence_parts)
 
     augmented_user_message = (
+        f"{memory_context}"
         f"Research evidence ({len(chunks)} chunks):\n"
         f"{evidence_block}\n\n"
         f"{'=' * 60}\n\n"
@@ -98,7 +123,7 @@ def run_rag_pipeline(
     )
 
     # ------------------------------------------------------------------
-    # 3. Build message list (prepend history, append augmented question)
+    # 4. Build message list (prepend history, append augmented question)
     # ------------------------------------------------------------------
     messages: list[dict] = []
     if conversation_history:
@@ -106,7 +131,7 @@ def run_rag_pipeline(
     messages.append({"role": "user", "content": augmented_user_message})
 
     # ------------------------------------------------------------------
-    # 4. Generate with Anthropic
+    # 5. Generate with Anthropic
     # ------------------------------------------------------------------
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     response = client.messages.create(
@@ -119,11 +144,11 @@ def run_rag_pipeline(
     answer: str = response.content[0].text
 
     # ------------------------------------------------------------------
-    # 5. Extract cited chunk IDs (UUIDs appearing after "chunk_id:")
+    # 6. Extract cited chunk IDs (UUIDs appearing after "chunk_id:")
     # ------------------------------------------------------------------
     uuid_pattern = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     cited_ids = list(
-        dict.fromkeys(  # preserves order, deduplicates
+        dict.fromkeys(
             re.findall(
                 rf"chunk_id[:\s]+({uuid_pattern})",
                 answer,
@@ -131,6 +156,20 @@ def run_rag_pipeline(
             )
         )
     )
+
+    # ------------------------------------------------------------------
+    # 7. Store this exchange as persistent memory for future sessions
+    # ------------------------------------------------------------------
+    if user_id:
+        try:
+            from backend.services.memory import add_memories
+            exchange = (conversation_history or []) + [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": answer},
+            ]
+            add_memories(exchange, project_id, user_id)
+        except Exception:
+            pass  # Memory storage failures must not affect the response
 
     return {
         "answer": answer,

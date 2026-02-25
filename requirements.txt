@@ -15,3 +15,10 @@ python-dotenv>=1.0.0
 # PDF extraction (optional — install at least one)
 pypdf>=4.2.0
 # pdfminer.six>=20221105  # heavier alternative; uncomment if needed
+
+# LangGraph — stateful multi-agent workflows with recursive evidence drilling
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# mem0 — persistent memory layer for PM agents (cross-session recall)
+mem0ai>=0.1.0

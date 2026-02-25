@@ -60,6 +60,7 @@ def rag_query(body: RAGQueryRequest) -> RAGQueryResponse:
         result = run_rag_pipeline(
             project_id=body.project_id,
             query=body.query,
+            user_id=body.user_id,
             conversation_history=history,
             match_count=body.match_count,
             source_types=body.source_types,

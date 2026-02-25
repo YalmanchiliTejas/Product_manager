@@ -27,6 +27,12 @@ class Settings:
     # Ingestion concurrency
     embed_concurrency: int = int(os.getenv("EMBED_CONCURRENCY", "4"))
 
+    # Persistent memory (mem0 pgvector backend)
+    # Set to a full PostgreSQL connection string: postgresql://user:pass@host:5432/dbname
+    # Available from Supabase: Project Settings → Database → Connection string (URI)
+    # If unset, mem0 falls back to local in-memory storage (memories lost on restart)
+    database_url: str = os.getenv("DATABASE_URL", "")
+
     def validate(self) -> None:
         missing = []
         if not self.supabase_url:
@@ -40,6 +46,15 @@ class Settings:
         if missing:
             raise EnvironmentError(
                 f"Missing required environment variables: {', '.join(missing)}"
+            )
+        if not self.database_url:
+            import warnings
+            warnings.warn(
+                "DATABASE_URL is not set. mem0 will use in-memory storage — "
+                "memories will not persist across server restarts. "
+                "Set DATABASE_URL to a PostgreSQL connection string for persistent memory.",
+                RuntimeWarning,
+                stacklevel=2,
             )
 
 
