@@ -1,4 +1,25 @@
-fastapi
-uvicorn
-motor
-pymongo
+# ============================================================
+# Core — always required
+# ============================================================
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+supabase>=2.4.0            # Supabase client (PostgREST + Storage + Auth)
+python-dotenv>=1.0.0
+pypdf>=4.2.0               # PDF text extraction
+# pdfminer.six>=20221105   # heavier PDF alternative; uncomment if needed
+
+# Agentic orchestration
+langgraph>=0.2.0           # stateful multi-agent graph (recursive synthesis pipeline)
+langchain-core>=0.3.0      # shared abstractions — also pulled in by langgraph
+
+# Persistent PM memory
+mem0ai>=0.1.0              # memory extraction, deduplication, retrieval
+
+# ============================================================
+# LLM providers — install the package(s) matching your LLM_PROVIDER
+# ============================================================
+langchain-anthropic>=0.2.0   # LLM_PROVIDER=anthropic  (default)
+langchain-openai>=0.2.0      # LLM_PROVIDER=openai  OR  EMBEDDING_PROVIDER=openai  (default)
+# langchain-ollama>=0.2.0    # LLM_PROVIDER=ollama | EMBEDDING_PROVIDER=ollama  (local, no key needed)
+# langchain-groq>=0.2.0      # LLM_PROVIDER=groq
+# langchain-cohere>=0.2.0    # EMBEDDING_PROVIDER=cohere
