@@ -2,7 +2,15 @@
 
 from fastapi import APIRouter, HTTPException
 
-from backend.schemas.models import MemoryAddRequest, MemoryItem, MemoryResponse, MemorySearchRequest
+from backend.schemas.models import (
+    ContextPackRequest,
+    ContextPackResponse,
+    MemoryAddRequest,
+    MemoryItem,
+    MemoryResponse,
+    MemorySearchRequest,
+)
+from backend.services.context_pack import get_context_pack
 from backend.services.memory import (
     add_memories,
     delete_memory,
@@ -117,3 +125,22 @@ def remove_memory(memory_id: str) -> None:
         delete_memory(memory_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/context-pack",
+    response_model=ContextPackResponse,
+    summary="Build compact context pack for a task",
+)
+def build_context_pack(body: ContextPackRequest) -> ContextPackResponse:
+    """Build and persist a compact context pack with citations."""
+    try:
+        pack = get_context_pack(
+            project_id=body.project_id,
+            task_type=body.task_type,
+            query=body.query,
+            budget_tokens=body.budget_tokens,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return ContextPackResponse(**pack)

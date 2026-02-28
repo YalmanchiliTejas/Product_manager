@@ -1,0 +1,13 @@
+{
+  "features": [
+    {"name": "incremental_source_change_detection", "passes": false},
+    {"name": "chunk_fts_index_and_keyword_rpc", "passes": false},
+    {"name": "hybrid_retrieval_keyword_plus_vector", "passes": false},
+    {"name": "context_pack_with_budget_and_citations", "passes": false},
+    {"name": "weekly_snapshot_and_index_memory", "passes": false},
+    {"name": "memory_run_logging", "passes": false},
+    {"name": "evidence_integrity_validation", "passes": false},
+    {"name": "decision_consistency_validation", "passes": false},
+    {"name": "prd_regression_constraints_metrics_risks", "passes": false}
+  ]
+}

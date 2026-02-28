@@ -233,3 +233,17 @@ class MemoryItem(BaseModel):
 
 class MemoryResponse(BaseModel):
     memories: list[MemoryItem]
+
+
+class ContextPackRequest(BaseModel):
+    project_id: str
+    task_type: str = Field(..., description="Task category (e.g., prd_generation).")
+    query: str
+    budget_tokens: int = Field(2500, ge=200, le=12000)
+
+
+class ContextPackResponse(BaseModel):
+    index: str
+    memory_items: list[dict]
+    evidence_chunks: list[dict]
+    citations: dict
