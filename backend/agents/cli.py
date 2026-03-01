@@ -166,7 +166,12 @@ def _run_repl(session):
         try:
             user_input = input(f"{_C.BOLD}You:{_C.RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
-            print(f"\n{_C.DIM}Goodbye!{_C.RESET}")
+            _print_system("\nSaving session to memory...")
+            try:
+                session.end()
+            except Exception:
+                pass
+            print(f"{_C.DIM}Goodbye!{_C.RESET}")
             break
 
         if not user_input:
@@ -177,6 +182,15 @@ def _run_repl(session):
             cmd = user_input.lower().split()[0]
 
             if cmd in ("/quit", "/exit", "/q"):
+                _print_system("Saving session to memory...")
+                try:
+                    stats = session.end()
+                    _print_system(
+                        f"Saved: {stats.get('mem0_stored', 0)} mem0 memories, "
+                        f"{stats.get('decision_log_items', 0)} decisions logged."
+                    )
+                except Exception as e:
+                    _print_system(f"Memory save skipped: {e}")
                 print(f"\n{_C.DIM}Goodbye!{_C.RESET}")
                 break
 
@@ -186,11 +200,13 @@ def _run_repl(session):
   /tasks     — show current task list
   /prd       — show generated PRD (markdown)
   /tickets   — show generated tickets
+  /decisions — show decisions/constraints extracted this session
   /export    — export PRD + tickets to ./output/
   /phase     — show current agent phase
   /auto      — ask with auto-confirm (no task confirmation step)
+  /save      — persist session to longitudinal memory now
   /help      — this help message
-  /quit      — exit
+  /quit      — exit (auto-saves to memory)
 """)
 
             elif cmd == "/tasks":
@@ -217,6 +233,39 @@ def _run_repl(session):
 
             elif cmd == "/phase":
                 print(f"\n{_C.DIM}Phase: {session.get_phase()}{_C.RESET}")
+
+            elif cmd == "/decisions":
+                decisions = session.get_decision_log()
+                if not decisions:
+                    print(f"\n{_C.DIM}No decisions extracted yet.{_C.RESET}")
+                else:
+                    print(f"\n{_C.BOLD}Decision Log ({len(decisions)} items):{_C.RESET}")
+                    type_icons = {
+                        "decision": f"{_C.CYAN}D{_C.RESET}",
+                        "constraint": f"{_C.RED}C{_C.RESET}",
+                        "metric": f"{_C.GREEN}M{_C.RESET}",
+                        "persona": f"{_C.MAGENTA}P{_C.RESET}",
+                    }
+                    for i, item in enumerate(decisions, 1):
+                        icon = type_icons.get(item.get("type", ""), "?")
+                        conf = item.get("confidence", "?")
+                        print(
+                            f"  {icon} {i}. {item.get('title', '?')} "
+                            f"{_C.DIM}[{conf}]{_C.RESET}"
+                        )
+                        print(f"     {item.get('content', '')[:120]}")
+
+            elif cmd == "/save":
+                _print_system("Saving session to memory...")
+                try:
+                    stats = session.end()
+                    _print_agent(
+                        f"Saved: {stats.get('mem0_stored', 0)} mem0 memories, "
+                        f"{stats.get('decision_log_items', 0)} decisions logged."
+                        + (" Index rebuilt." if stats.get("index_rebuilt") else "")
+                    )
+                except Exception as e:
+                    _print_error(str(e))
 
             elif cmd == "/auto":
                 parts = user_input.split(maxsplit=1)

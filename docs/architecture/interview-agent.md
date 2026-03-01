@@ -18,6 +18,155 @@ the CLI `--provider` flag. Supports: Anthropic, OpenAI, Ollama, Groq, Azure.
 
 ---
 
+## Quick Start — Setup & Run
+
+### Prerequisites
+
+```bash
+# Python 3.10+
+python --version
+
+# Install dependencies (from project root)
+pip install -r requirements.txt
+```
+
+### Environment Variables
+
+Create a `.env` file in the project root (or export these):
+
+```bash
+# Required — pick ONE LLM provider:
+LLM_PROVIDER=anthropic          # or: openai, ollama, groq, azure_openai
+
+# Provider API key (match your LLM_PROVIDER):
+ANTHROPIC_API_KEY=sk-ant-...    # if LLM_PROVIDER=anthropic
+# OPENAI_API_KEY=sk-...         # if LLM_PROVIDER=openai
+# GROQ_API_KEY=gsk_...          # if LLM_PROVIDER=groq
+
+# Optional — model overrides:
+# FAST_MODEL=claude-haiku-4-5-20251001
+# STRONG_MODEL=claude-sonnet-4-6
+
+# Optional — for longitudinal memory persistence (DB-backed):
+# SUPABASE_URL=https://xxx.supabase.co
+# SUPABASE_SERVICE_ROLE_KEY=eyJ...
+# DATABASE_URL=postgresql://postgres:...@db.xxx.supabase.co:5432/postgres
+
+# Optional — for embeddings (needed for DB-backed memory):
+# EMBEDDING_PROVIDER=openai
+# EMBEDDING_MODEL=text-embedding-3-small
+```
+
+**Minimum to run:** Just `LLM_PROVIDER` + the matching API key. Everything
+else is optional. The agent works fully without a database — memory persists
+within the session via the in-memory DecisionLog.
+
+### Run the CLI
+
+```bash
+# Basic — parse interviews from a folder and start REPL
+python -m backend.agents.cli ./path/to/interviews/
+
+# With provider switching
+python -m backend.agents.cli ./interviews/ --provider openai --model gpt-4o
+python -m backend.agents.cli ./interviews/ --provider ollama --model llama3
+python -m backend.agents.cli ./interviews/ --provider groq --model mixtral-8x7b
+
+# With market context
+python -m backend.agents.cli ./interviews/ --market "B2B SaaS targeting SMBs, $50B TAM"
+
+# Non-interactive (single question, auto-confirm, exports to ./output/)
+python -m backend.agents.cli ./interviews/ --auto "What are the top user pain points?"
+
+# With API key inline
+python -m backend.agents.cli ./interviews/ --provider anthropic --api-key sk-ant-...
+```
+
+### Interview File Formats
+
+Place your files in a folder. Supported formats:
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| Plain text | `.txt` | Interview transcripts, notes |
+| Markdown | `.md` | Formatted notes, summaries |
+| CSV | `.csv` | Survey responses, NPS data |
+| PDF | `.pdf` | Requires `pypdf` (already in requirements) |
+| JSON | `.json` | Structured data, arrays of responses |
+
+The parser auto-detects speaker labels (`Name:`, `[Name]`, `Q:/A:`) and
+timestamps (`HH:MM:SS`, `MM:SS`).
+
+### REPL Commands
+
+Once in the REPL:
+
+```
+/tasks     — show current task list with status icons
+/prd       — show generated PRD (markdown)
+/tickets   — show generated tickets
+/decisions — show decisions/constraints extracted this session
+/export    — export PRD + tickets to ./output/
+/auto <q>  — ask with auto-confirm (no task confirmation step)
+/save      — persist session to longitudinal memory now
+/phase     — show current agent phase
+/help      — show all commands
+/quit      — exit (auto-saves to memory)
+```
+
+### Run the API Server
+
+```bash
+# Start FastAPI
+uvicorn backend.main:app --reload --port 8000
+
+# Then use the interview endpoints:
+# POST /api/interview/sessions         — create session
+# POST /api/interview/sessions/{id}/ask — submit question
+# etc. (see API docs at http://localhost:8000/docs)
+```
+
+### Run DB Migrations (optional, for persistence)
+
+```bash
+# Apply in your Supabase SQL editor or via psql:
+psql $DATABASE_URL -f db/migrations/0001_pgvector_semantic_search.sql
+psql $DATABASE_URL -f db/migrations/0002_memory_context_pack.sql
+psql $DATABASE_URL -f db/migrations/0003_interview_agent.sql
+```
+
+### Test It
+
+```bash
+# 1. Create a folder with sample interviews
+mkdir -p ./test_interviews
+echo "Interviewer: What's your biggest pain point?
+User: The onboarding is confusing. I couldn't figure out how to set up my first project.
+Interviewer: How often do you use the product?
+User: Daily, but I avoid the analytics dashboard because it's too slow." > ./test_interviews/user_interview_1.txt
+
+# 2. Run the agent
+python -m backend.agents.cli ./test_interviews/
+
+# 3. Ask a question
+# > What are the main pain points?
+# (agent analyses, extracts claims, generates research report)
+
+# 4. Confirm tasks when prompted
+# > yes
+
+# 5. Review the PRD
+# > approve
+
+# 6. Check outputs
+# /prd
+# /tickets
+# /decisions
+# /export
+```
+
+---
+
 ## File Map
 
 ```
@@ -28,6 +177,7 @@ backend/agents/
 ├── state.py             # Shared state TypedDict + helper models
 ├── doc_parser.py        # Document parser (folder → structured interview data)
 ├── orchestrator.py      # Main LangGraph graph + InterviewSession class
+├── memory_hooks.py      # Longitudinal memory: recall, persist, consolidate
 ├── context_agent.py     # Dynamic context fetcher sub-agent
 ├── research_agent.py    # Deep research sub-agent
 ├── prd_agent.py         # PRD generator sub-agent
@@ -216,7 +366,9 @@ intake → analyze_question → plan_tasks → confirm_tasks
   - `.ask(question, auto_confirm=False)` — submit question, run pipeline
   - `.confirm(response)` — confirm/reject tasks
   - `.review_prd(response)` — approve/revise PRD
+  - `.end()` — persist session to longitudinal memory
   - `.get_tasks()`, `.get_prd()`, `.get_tickets()` — access outputs
+  - `.get_decision_log()` — access extracted decisions/constraints
 
 **Key nodes:**
 - `intake_node` — counts loaded interviews, sets phase to "waiting"
@@ -371,252 +523,15 @@ entirely without them — all state is in-memory via `InterviewState`.
                     └──────────────────────────────────────┘
 ```
 
-## Memory Hooks — Cross-Session Persistence
+## Longitudinal Memory Architecture
 
-The interview agent integrates with the existing memory system via three
-hooks in `backend/agents/memory_hooks.py`. These ensure that research
-findings, PRD decisions, and ticket plans survive across sessions.
+The interview agent integrates with the existing memory infrastructure to
+persist decisions, constraints, metrics, and persona insights across sessions.
 
-### Architecture
-
-```
-                    ┌── HOOK 1: Session Start ──┐
-                    │  Recall past decisions     │
-                    │  from mem0 + memory_items  │
-                    │  Inject into state.messages│
-                    └────────────┬───────────────┘
-                                 │
-    research → prd → tickets     │
-                                 │
-                    ┌── HOOK 2: After Each Phase ─┐
-                    │  Extract & store:            │
-                    │  - research → metrics/claims │
-                    │  - PRD → decisions/constraints│
-                    │  - tickets → snapshot         │
-                    │  LLM-powered type inference   │
-                    └────────────┬─────────────────┘
-                                 │
-                    ┌── HOOK 3: Session End ───────┐
-                    │  Full conversation → mem0     │
-                    │  Consolidate + supersede      │
-                    │  Rebuild compact index         │
-                    └───────────────────────────────┘
-```
-
-### Hook 1 — Recall Past Decisions (`recall_past_decisions`)
-
-**When:** On every new question (`analyze_question_node`)
-
-**What it does:**
-1. Searches **mem0** for conversational memories matching the question
-2. Searches **memory_items** table for structured decisions, constraints,
-   metrics, and personas related to the project
-3. Formats them as a `[Prior Context]` message injected into `state.messages`
-4. Passes prior context to the analysis LLM so it factors in past decisions
-
-**Graceful degradation:** If mem0 or the DB is unavailable (CLI-only mode),
-the hook silently returns an empty list and the pipeline proceeds normally.
-
-### Hook 2 — After Each Phase (`extract_and_store_*_memories`)
-
-**When:** After each major phase completes in the orchestrator
-
-**Three variants:**
-- `extract_and_store_research_memories` — after `dispatch_research_node`
-  - Extracts validated claims, quantified metrics, key themes
-  - Uses LLM-powered type inference (not keyword-based)
-  - Writes to `memory_items` with authority 2 (research-level)
-
-- `extract_and_store_prd_memories` — after `generate_prd_node`
-  - Extracts decisions, constraints, KPIs from the PRD
-  - Writes to `memory_items` with authority 3 (PRD-level)
-
-- `extract_and_store_ticket_memories` — after `create_tickets_node`
-  - Stores a compact snapshot (epic titles, story counts, total points)
-  - Writes to `memory_items` as type `snapshot` with authority 4
-
-**LLM-powered extraction:** Uses the fast LLM with a structured prompt to
-classify content into decision/constraint/metric/persona/theme items.
-This is more accurate than the keyword-based approach in `memory_update_graph.py`.
-
-### Hook 3 — Session End (`persist_session_to_memory`)
-
-**When:** At `present_results_node` (automatic) or via `POST /api/interview/sessions/{id}/end` (explicit)
-
-**What it does:**
-1. Feeds the full conversation history to **mem0** (`add_memories`)
-   - mem0 uses its LLM to decide what's worth remembering
-   - Handles deduplication and updates automatically
-2. Runs **consolidation + supersede** on `memory_items`
-   - Detects duplicate decisions/constraints by matching title+type
-   - Marks exact duplicates as superseded (sets `effective_to`)
-3. Rebuilds the **compact index** (`rebuild_index_memory`)
-   - Updates the always-on pointer-style index for quick context lookups
-
-### File Map (new)
+### How It Works
 
 ```
-backend/agents/
-├── memory_hooks.py      # All 3 memory hooks + LLM extraction logic
-└── orchestrator.py      # Modified: hooks wired into graph nodes
-
-backend/agents/state.py  # Modified: added recalled_memories field
-
-backend/routers/
-└── interview.py         # Modified: added POST /sessions/{id}/end endpoint
-```
-
----
-
-## Setup & Running the Interview Agent
-
-### Prerequisites
-
-1. **Python 3.11+** with dependencies installed:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Environment variables** — create a `.env` file in the project root:
-   ```bash
-   # Required: LLM provider
-   LLM_PROVIDER=anthropic          # or: openai, ollama, groq, azure_openai
-   ANTHROPIC_API_KEY=sk-ant-...    # (or the key for your chosen provider)
-
-   # Required: Embedding provider (for memory search)
-   EMBEDDING_PROVIDER=openai
-   OPENAI_API_KEY=sk-...
-
-   # Optional but recommended: Supabase (enables persistent memory)
-   SUPABASE_URL=https://your-project.supabase.co
-   SUPABASE_SERVICE_ROLE_KEY=eyJ...
-
-   # Optional: PostgreSQL for mem0 persistent storage
-   DATABASE_URL=postgresql://user:pass@host:5432/dbname
-
-   # Optional: Model overrides
-   STRONG_MODEL=claude-sonnet-4-6
-   FAST_MODEL=claude-haiku-4-5-20251001
-   ```
-
-3. **Database migrations** (if using Supabase):
-   ```bash
-   # Run in order against your Supabase SQL editor:
-   cat db/migrations/0001_pgvector_semantic_search.sql
-   cat db/migrations/0002_memory_context_pack.sql
-   cat db/migrations/0003_interview_agent.sql
-   ```
-
-### Running the CLI
-
-```bash
-# Basic usage — analyse interviews in a folder
-python -m backend.agents.cli ./interviews/
-
-# With a specific LLM provider
-python -m backend.agents.cli ./interviews/ --provider openai --model gpt-4o
-
-# With Ollama (local, free)
-python -m backend.agents.cli ./interviews/ --provider ollama --model llama3
-
-# With market context
-python -m backend.agents.cli ./interviews/ --market "B2B SaaS, $50B TAM"
-
-# Non-interactive (auto-confirm, exports to ./output/)
-python -m backend.agents.cli ./interviews/ --auto "What are the top pain points?"
-
-# With an existing project (enables full memory recall)
-python -m backend.agents.cli ./interviews/ --project-id <uuid>
-```
-
-**REPL commands:**
-| Command    | Description                              |
-|------------|------------------------------------------|
-| `/tasks`   | Show current task list with status icons  |
-| `/prd`     | Show generated PRD markdown               |
-| `/tickets` | Show generated tickets                    |
-| `/export`  | Export PRD + tickets to `./output/`       |
-| `/auto Q`  | Ask with auto-confirm (no confirmation)   |
-| `/phase`   | Show current agent phase                  |
-| `/help`    | Show all commands                         |
-| `/quit`    | Exit                                      |
-
-### Running the API Server
-
-```bash
-# Start the FastAPI server
-uvicorn backend.main:app --reload --port 8000
-```
-
-**Interview API endpoints:**
-
-| Method | Endpoint                              | Description               |
-|--------|---------------------------------------|---------------------------|
-| POST   | `/api/interview/sessions`             | Create a new session      |
-| GET    | `/api/interview/sessions/{id}`        | Get session state         |
-| POST   | `/api/interview/sessions/{id}/ask`    | Submit a question         |
-| POST   | `/api/interview/sessions/{id}/confirm`| Confirm/reject tasks      |
-| POST   | `/api/interview/sessions/{id}/review` | Approve/revise PRD        |
-| GET    | `/api/interview/sessions/{id}/tasks`  | Get task list             |
-| GET    | `/api/interview/sessions/{id}/prd`    | Get generated PRD         |
-| GET    | `/api/interview/sessions/{id}/tickets`| Get generated tickets     |
-| POST   | `/api/interview/sessions/{id}/end`    | End session + persist memory |
-
-### Memory Hooks Configuration
-
-The memory hooks work automatically with no extra configuration. They
-gracefully degrade when infrastructure isn't available:
-
-| Feature                 | Without DB      | With Supabase + DATABASE_URL |
-|-------------------------|-----------------|------------------------------|
-| Hook 1 (recall)         | Skipped silently| Searches mem0 + memory_items |
-| Hook 2 (extract+store)  | Skipped silently| LLM extracts → memory_items  |
-| Hook 3 (persist+index)  | Skipped silently| mem0 + consolidate + reindex |
-| Core pipeline           | Works fully     | Works fully                  |
-
-**For full memory persistence, set both:**
-- `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (for memory_items table)
-- `DATABASE_URL` (for mem0 pgvector backend)
-
-Without these, the agent still works — interview analysis, PRD generation,
-and ticket creation all function without persistent memory. You just won't
-get cross-session recall.
-
-### Testing the Agent
-
-**Quick smoke test (no DB required):**
-```bash
-# Create a test interviews folder
-mkdir -p test_interviews
-echo "User: The onboarding process is really confusing. I spent 20 minutes
-trying to figure out how to invite my team. The API docs are great though." \
-  > test_interviews/interview1.txt
-
-# Run with auto-confirm
-python -m backend.agents.cli ./test_interviews/ --auto "What are the top pain points?"
-```
-
-**Full pipeline test (with DB):**
-```bash
-# 1. Start the server
-uvicorn backend.main:app --reload --port 8000
-
-# 2. Create a session
-curl -X POST http://localhost:8000/api/interview/sessions \
-  -H "Content-Type: application/json" \
-  -d '{"interview_data": [{"filename": "test.txt", "content": "...", "metadata": {}}],
-       "project_id": "test-project", "user_id": "test-user"}'
-
-# 3. Ask a question (auto-confirm)
-curl -X POST http://localhost:8000/api/interview/sessions/{session_id}/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What are the top pain points?", "auto_confirm": true}'
-
-# 4. End session (triggers memory persistence)
-curl -X POST http://localhost:8000/api/interview/sessions/{session_id}/end
-
-# 5. Start a NEW session with the same project_id
-#    Hook 1 will now recall decisions from the previous session
+Session N                              Session N+1
 ```
 
 ---

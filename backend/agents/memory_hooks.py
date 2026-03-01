@@ -1,26 +1,22 @@
-"""Memory hooks for the interview agent.
+"""Longitudinal memory hooks for the interview agent.
 
-Three hooks wire the interview orchestrator into the existing memory system:
+Wires the interview agent into the existing memory infrastructure so
+decisions, research findings, and PRD choices persist across sessions.
 
-Hook 1 — Session Start / New Question
-    Recall past decisions, constraints, and metrics from both mem0 and
-    memory_items, then inject them into state.messages so every sub-agent
-    sees prior context.
+Three hooks:
+  1. recall_memories()   — Session start: fetch past decisions/constraints
+  2. persist_phase()     — After each phase: extract & store structured items
+  3. persist_session()   — Session end: full conversation → mem0 + consolidate
 
-Hook 2 — After Each Phase
-    Extract structured memory items (decisions, constraints, metrics,
-    personas) from research results, PRD outputs, and ticket snapshots.
-    Uses LLM-powered type inference and writes directly to memory_items.
-
-Hook 3 — Session End
-    Feed the full conversation to mem0 (add_memories), run consolidation
-    + supersede to deduplicate, and rebuild the compact index.
+Works without a DB (CLI-only mode) by maintaining a local in-memory
+decision log that persists within a single session.  When Supabase is
+connected, it writes to the memory_items table and runs consolidation.
 """
 
 from __future__ import annotations
 
 import json
-import logging
+import re
 from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -28,463 +24,452 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from backend.agents.state import InterviewState
 from backend.services.llm import get_fast_llm
 
-logger = logging.getLogger(__name__)
 
-# ── Prompts ──────────────────────────────────────────────────────────────
+# ── Extraction prompt ────────────────────────────────────────────────────
 
-_EXTRACTION_PROMPT = """\
-You are a memory-extraction specialist for a product management AI system.
+_MEMORY_EXTRACTION_PROMPT = """\
+You are a memory extraction system for a product management AI.
 
-Given the content below (research findings, PRD decisions, or ticket snapshots),
-extract structured memory items that should be persisted for future sessions.
+Given the output of an agent phase, extract structured memory items that
+should be persisted for future sessions.  Each item is a decision,
+constraint, metric, or persona insight that would affect future product
+decisions.
 
-Return a JSON array of objects:
+Return a JSON array:
 [
   {
-    "type": "decision|constraint|metric|persona|theme",
+    "type": "decision|constraint|metric|persona",
     "title": "Short descriptive title (max 120 chars)",
-    "content": "Full detail of the item (max 500 chars)",
-    "authority": 1-5,
-    "tags": ["tag1", "tag2"]
+    "content": "Full detail of the item",
+    "confidence": "high|medium|low",
+    "source": "Which phase/data produced this"
   }
 ]
 
-Type guidelines:
-- decision: A product choice that was made ("we chose self-serve onboarding over API-first")
-- constraint: A requirement or limitation ("must support WCAG 2.1 AA")
-- metric: A quantified finding ("80% of users cited onboarding friction")
-- persona: A user segment or archetype identified
-- theme: A recurring pattern across interviews
-
-Authority scale:
-- 1: Inferred from single mention
-- 2: Supported by multiple data points
-- 3: Validated by research with evidence
-- 4: Confirmed by user / stakeholder review
-- 5: Formal decision (approved PRD, confirmed ticket plan)
-
-Extract only genuinely important items. Prefer fewer high-quality items over many low-quality ones.
-Return an empty array [] if nothing is worth persisting."""
+Guidelines:
+- decision: A choice that was made (e.g. "Prioritise onboarding over retention")
+- constraint: A hard requirement or limitation (e.g. "Must support offline mode")
+- metric: A quantified finding (e.g. "80% of users cited onboarding friction")
+- persona: A user archetype with needs (e.g. "Power users want API access")
+- Only extract items that are actionable and would affect future decisions
+- Be specific — "users want better UX" is too vague
+- Include the evidence source where possible"""
 
 
-# ── Hook 1: Recall Past Decisions ────────────────────────────────────────
+# ── Local decision log (session-scoped, no DB needed) ────────────────────
 
-def recall_past_decisions(state: InterviewState) -> dict:
-    """Recall relevant past decisions and inject them into state.
+class DecisionLog:
+    """In-memory decision log for a single session.
 
-    Searches both mem0 (conversation-derived memories) and the memory_items
-    table (structured decisions/constraints/metrics) for the current project.
-    Returns a dict to merge into state.
+    Always available, even without a DB.  When the DB is connected,
+    items are also written to memory_items.
+    """
+
+    def __init__(self):
+        self.items: list[dict] = []
+
+    def add(self, item: dict) -> None:
+        item.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+        self.items.append(item)
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """Simple keyword search over the local log."""
+        query_words = set(query.lower().split())
+        scored: list[tuple[float, dict]] = []
+        for item in self.items:
+            text = f"{item.get('title', '')} {item.get('content', '')}".lower()
+            text_words = set(text.split())
+            overlap = len(query_words & text_words) / max(len(query_words), 1)
+            scored.append((overlap, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    def get_by_type(self, item_type: str) -> list[dict]:
+        return [i for i in self.items if i.get("type") == item_type]
+
+    def get_all(self) -> list[dict]:
+        return list(self.items)
+
+    def summary(self) -> str:
+        """Compact summary for injection into agent prompts."""
+        if not self.items:
+            return ""
+        lines = ["Past decisions and findings from this session:"]
+        for item in self.items[-20:]:  # last 20 items
+            lines.append(
+                f"- [{item.get('type', '?')}] {item.get('title', '?')}: "
+                f"{item.get('content', '')[:150]}"
+            )
+        return "\n".join(lines)
+
+
+# ── HOOK 1: Session start — recall past memories ─────────────────────────
+
+def recall_memories(state: InterviewState, decision_log: DecisionLog) -> dict:
+    """Recall relevant memories from past sessions and inject into state.
+
+    Searches both the DB memory layer (if available) and the local
+    decision log.  Returns a dict to merge into state.
     """
     project_id = state.get("project_id", "")
     user_id = state.get("user_id", "")
     question = state.get("current_question", "")
-
-    if not project_id or not question:
-        return {"recalled_memories": []}
+    messages = state.get("messages", [])
 
     recalled: list[dict] = []
 
-    # 1. Search mem0 for conversational memories
-    try:
-        from backend.services.memory import search_memories
-        mem0_results = search_memories(
-            query=question,
-            project_id=project_id,
-            user_id=user_id,
-            limit=8,
-        )
-        for item in mem0_results:
-            recalled.append({
-                "source": "mem0",
-                "content": item.get("memory", ""),
-                "score": item.get("score", 0),
-            })
-    except Exception as exc:
-        logger.debug("mem0 recall skipped: %s", exc)
-
-    # 2. Search memory_items table for structured items
-    try:
-        from backend.services.hybrid_search import hybrid_search_memory_items
-        db_items = hybrid_search_memory_items(
-            project_id=project_id,
-            query=question,
-            match_count=10,
-        )
-        for item in db_items:
-            if item.get("type") in ("decision", "constraint", "metric", "persona"):
+    # 1. Search DB memories (mem0 + memory_items)
+    if project_id and user_id:
+        try:
+            from backend.services.memory import search_memories
+            db_memories = search_memories(question, project_id, user_id, limit=5)
+            for mem in db_memories:
                 recalled.append({
-                    "source": "memory_items",
-                    "type": item.get("type"),
-                    "title": item.get("title", ""),
-                    "content": item.get("content", ""),
-                    "authority": item.get("authority", 0),
+                    "source": "mem0",
+                    "type": "memory",
+                    "content": mem.get("memory", ""),
+                    "score": mem.get("score", 0),
                 })
-    except Exception as exc:
-        logger.debug("memory_items recall skipped: %s", exc)
+        except Exception:
+            pass  # DB not available
 
-    # 3. Build context message for sub-agents
+        # Also search structured memory_items (decisions, constraints)
+        try:
+            from backend.services.hybrid_search import hybrid_search_memory_items
+            items = hybrid_search_memory_items(
+                project_id=project_id,
+                query=question or "product decisions constraints metrics",
+                match_count=8,
+            )
+            for item in items:
+                if item.get("type") in ("decision", "constraint", "metric", "persona"):
+                    recalled.append({
+                        "source": "memory_items",
+                        "type": item.get("type"),
+                        "title": item.get("title", ""),
+                        "content": item.get("content", ""),
+                    })
+        except Exception:
+            pass
+
+    # 2. Search local decision log
+    if question:
+        local = decision_log.search(question, limit=5)
+        for item in local:
+            recalled.append({
+                "source": "session_log",
+                "type": item.get("type", "decision"),
+                "title": item.get("title", ""),
+                "content": item.get("content", ""),
+            })
+
+    # 3. Inject into messages if we found anything
     if recalled:
-        context_lines = ["[Prior Context — recalled from past sessions]"]
-        for mem in recalled:
-            if mem["source"] == "mem0":
-                context_lines.append(f"• {mem['content']}")
-            else:
-                tag = f"[{mem.get('type', 'info')}]"
-                context_lines.append(
-                    f"• {tag} {mem.get('title', '')}: {mem.get('content', '')}"
-                )
-
-        messages = state.get("messages", [])
+        recall_text = _format_recalled_memories(recalled)
         messages.append({
             "role": "assistant",
-            "content": "\n".join(context_lines),
+            "content": f"Recalled {len(recalled)} relevant memories from past sessions:\n{recall_text}",
         })
-        return {"recalled_memories": recalled, "messages": messages}
 
-    return {"recalled_memories": []}
-
-
-# ── Hook 2: Extract and Store Phase Memories ─────────────────────────────
-
-def extract_and_store_research_memories(state: InterviewState) -> None:
-    """Extract memory items from research results and store them.
-
-    Called after dispatch_research completes. Extracts validated claims,
-    quantified metrics, and key themes from the research output.
-    """
-    project_id = state.get("project_id", "")
-    research = state.get("research_results", {})
-
-    if not project_id or not research:
-        return
-
-    # Build content block for LLM extraction
-    content_parts = []
-    if research.get("summary"):
-        content_parts.append(f"Research Summary:\n{research['summary']}")
-
-    if research.get("validated_claims"):
-        claims_text = json.dumps(research["validated_claims"], indent=2)
-        content_parts.append(f"Validated Claims:\n{claims_text}")
-
-    if research.get("quantified_metrics"):
-        metrics_text = json.dumps(research["quantified_metrics"], indent=2)
-        content_parts.append(f"Quantified Metrics:\n{metrics_text}")
-
-    if research.get("key_themes"):
-        themes_text = json.dumps(research["key_themes"], indent=2)
-        content_parts.append(f"Key Themes:\n{themes_text}")
-
-    if research.get("contradictions"):
-        contra_text = json.dumps(research["contradictions"], indent=2)
-        content_parts.append(f"Contradictions:\n{contra_text}")
-
-    if not content_parts:
-        return
-
-    _extract_and_write(
-        project_id=project_id,
-        phase="research",
-        content="\n\n".join(content_parts),
-    )
-
-
-def extract_and_store_prd_memories(state: InterviewState) -> None:
-    """Extract memory items from PRD document and store them.
-
-    Called after generate_prd completes. Extracts decisions, constraints,
-    KPIs, and user stories from the PRD output.
-    """
-    project_id = state.get("project_id", "")
-    prd = state.get("prd_document", {})
-
-    if not project_id or not prd:
-        return
-
-    content_parts = []
-    if prd.get("title"):
-        content_parts.append(f"PRD Title: {prd['title']}")
-
-    if prd.get("problem_statement"):
-        content_parts.append(f"Problem Statement:\n{prd['problem_statement']}")
-
-    if prd.get("proposed_solution"):
-        content_parts.append(f"Proposed Solution:\n{prd['proposed_solution']}")
-
-    if prd.get("kpis"):
-        kpis_text = json.dumps(prd["kpis"], indent=2)
-        content_parts.append(f"KPIs:\n{kpis_text}")
-
-    if prd.get("constraints_and_risks"):
-        constraints = "\n".join(f"- {c}" for c in prd["constraints_and_risks"])
-        content_parts.append(f"Constraints and Risks:\n{constraints}")
-
-    if prd.get("user_stories"):
-        stories = "\n".join(f"- {s}" for s in prd["user_stories"])
-        content_parts.append(f"User Stories:\n{stories}")
-
-    if prd.get("next_actions"):
-        actions_text = json.dumps(prd["next_actions"], indent=2)
-        content_parts.append(f"Next Actions:\n{actions_text}")
-
-    if not content_parts:
-        return
-
-    _extract_and_write(
-        project_id=project_id,
-        phase="prd",
-        content="\n\n".join(content_parts),
-        base_authority=3,  # PRD decisions get higher authority
-    )
-
-
-def extract_and_store_ticket_memories(state: InterviewState) -> None:
-    """Store a snapshot of created tickets as a memory item.
-
-    Called after create_tickets completes. Writes a compact snapshot
-    rather than extracting individual items.
-    """
-    project_id = state.get("project_id", "")
-    tickets = state.get("tickets", [])
-    prd = state.get("prd_document", {})
-
-    if not project_id or not tickets:
-        return
-
-    # Build a compact snapshot
-    epics = [t for t in tickets if t.get("ticket_type") == "epic"]
-    stories = [t for t in tickets if t.get("ticket_type") == "story"]
-    tasks = [t for t in tickets if t.get("ticket_type") == "task"]
-    total_points = sum(t.get("estimated_points") or 0 for t in tickets)
-
-    snapshot = {
-        "prd_title": prd.get("title", "Untitled"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "counts": {
-            "epics": len(epics),
-            "stories": len(stories),
-            "tasks": len(tasks),
-            "total_points": total_points,
-        },
-        "epic_titles": [e.get("title", "") for e in epics],
-        "question": state.get("current_question", ""),
+    return {
+        "messages": messages,
+        "recalled_memories": recalled,
     }
 
-    try:
-        from backend.db.supabase_client import get_supabase
-        db = get_supabase()
-        db.table("memory_items").insert({
-            "project_id": project_id,
-            "type": "snapshot",
-            "title": f"Ticket plan: {prd.get('title', 'Untitled')}",
-            "content": json.dumps(snapshot),
-            "authority": 4,
-            "tags": ["tickets", "implementation_plan"],
-            "metadata": {
-                "session_id": state.get("session_id", ""),
-                "extracted_by": "interview_agent_hook2",
-                "phase": "tickets",
-            },
-        }).execute()
-        logger.info(
-            "Stored ticket snapshot for project %s (%d tickets, %d pts)",
-            project_id, len(tickets), total_points,
-        )
-    except Exception as exc:
-        logger.debug("Ticket snapshot storage skipped: %s", exc)
+
+def _format_recalled_memories(memories: list[dict]) -> str:
+    """Format recalled memories for display / prompt injection."""
+    lines: list[str] = []
+    for mem in memories:
+        source = mem.get("source", "?")
+        mtype = mem.get("type", "?")
+        title = mem.get("title", "")
+        content = mem.get("content", "")
+        if title:
+            lines.append(f"  [{mtype}] {title}: {content[:200]} (from {source})")
+        else:
+            lines.append(f"  [{mtype}] {content[:250]} (from {source})")
+    return "\n".join(lines)
 
 
-def _extract_and_write(
-    project_id: str,
-    phase: str,
-    content: str,
-    base_authority: int = 2,
-) -> int:
-    """LLM-powered extraction of structured memory items from phase output.
+# ── HOOK 2: After phase — extract and persist structured items ───────────
 
-    Uses the fast LLM to classify content into decision/constraint/metric/
-    persona/theme items, then writes them to the memory_items table.
+def persist_phase(
+    state: InterviewState,
+    decision_log: DecisionLog,
+    phase_name: str,
+) -> None:
+    """Extract structured memory items from a completed phase and persist.
 
-    Returns the number of items written.
+    Called after: research, prd_generation, ticket_creation.
     """
-    # Truncate content to avoid token limits
-    truncated = content[:8000]
+    phase_data = _get_phase_data(state, phase_name)
+    if not phase_data:
+        return
+
+    # Use LLM to extract structured items
+    items = _extract_memory_items(phase_name, phase_data)
+
+    # Store in local decision log (always works)
+    for item in items:
+        item["phase"] = phase_name
+        item["session_id"] = state.get("session_id", "")
+        decision_log.add(item)
+
+    # Store in DB if available
+    _persist_to_db(state, items)
+
+
+def _get_phase_data(state: InterviewState, phase_name: str) -> str:
+    """Get the relevant data from a completed phase for extraction."""
+    if phase_name == "research":
+        research = state.get("research_results", {})
+        if not research:
+            return ""
+        parts = []
+        summary = research.get("summary", "")
+        if summary:
+            parts.append(f"Research Summary:\n{summary}")
+        for claim in research.get("validated_claims", [])[:10]:
+            parts.append(
+                f"Validated: {claim.get('claim', '')} "
+                f"(confidence: {claim.get('confidence', '?')})"
+            )
+        for contra in research.get("contradictions", [])[:5]:
+            parts.append(
+                f"Contradiction: {contra.get('claim_a', '')} vs {contra.get('claim_b', '')}"
+            )
+        for metric in research.get("quantified_metrics", [])[:10]:
+            parts.append(
+                f"Metric: {metric.get('metric', '')} = {metric.get('value', '')}"
+            )
+        return "\n".join(parts)
+
+    elif phase_name == "prd":
+        prd = state.get("prd_document", {})
+        if not prd:
+            return ""
+        parts = [f"PRD Title: {prd.get('title', '')}"]
+        if prd.get("problem_statement"):
+            parts.append(f"Problem: {prd['problem_statement'][:500]}")
+        for story in prd.get("user_stories", [])[:5]:
+            parts.append(f"User Story: {story}")
+        for kpi in prd.get("kpis", [])[:5]:
+            parts.append(
+                f"KPI: {kpi.get('metric', '')} → {kpi.get('target', '')}"
+            )
+        for risk in prd.get("constraints_and_risks", [])[:5]:
+            parts.append(f"Constraint/Risk: {risk}")
+        for action in prd.get("next_actions", [])[:5]:
+            parts.append(
+                f"Next Action: {action.get('action', '')} "
+                f"(owner: {action.get('owner', '?')})"
+            )
+        return "\n".join(parts)
+
+    elif phase_name == "tickets":
+        tickets = state.get("tickets", [])
+        if not tickets:
+            return ""
+        parts = [f"Created {len(tickets)} tickets:"]
+        for t in tickets[:10]:
+            pts = f" [{t.get('estimated_points')}pts]" if t.get("estimated_points") else ""
+            parts.append(f"- [{t.get('ticket_type', '?')}] {t.get('title', '')}{pts}")
+        total_pts = sum(t.get("estimated_points") or 0 for t in tickets)
+        parts.append(f"Total: {total_pts} story points")
+        return "\n".join(parts)
+
+    return ""
+
+
+def _extract_memory_items(phase_name: str, phase_data: str) -> list[dict]:
+    """Use the fast LLM to extract structured memory items."""
+    llm = get_fast_llm()
+    response = llm.invoke([
+        SystemMessage(content=_MEMORY_EXTRACTION_PROMPT),
+        HumanMessage(content=(
+            f"Phase: {phase_name}\n\n"
+            f"Phase Output:\n{phase_data[:8000]}"
+        )),
+    ])
 
     try:
-        llm = get_fast_llm()
-        response = llm.invoke([
-            SystemMessage(content=_EXTRACTION_PROMPT),
-            HumanMessage(content=f"Phase: {phase}\n\n{truncated}"),
-        ])
+        items = json.loads(response.content)
+        if isinstance(items, list):
+            return items
+    except (json.JSONDecodeError, TypeError):
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", response.content)
+        if match:
+            try:
+                items = json.loads(match.group(1))
+                if isinstance(items, list):
+                    return items
+            except (json.JSONDecodeError, TypeError):
+                pass
 
-        items = _parse_extraction_response(response.content)
-    except Exception as exc:
-        logger.debug("LLM extraction failed for phase %s: %s", phase, exc)
-        return 0
+    return []
 
-    if not items:
-        return 0
 
-    written = 0
+def _persist_to_db(state: InterviewState, items: list[dict]) -> None:
+    """Write extracted memory items to the memory_items table.
+
+    Gracefully skips if DB is unavailable.
+    """
+    project_id = state.get("project_id", "")
+    if not project_id:
+        return
+
     try:
         from backend.db.supabase_client import get_supabase
         db = get_supabase()
 
         for item in items:
             item_type = item.get("type", "decision")
-            if item_type not in ("decision", "constraint", "metric", "persona", "theme"):
+            if item_type not in ("decision", "constraint", "metric", "persona"):
                 continue
-
-            authority = min(
-                max(item.get("authority", base_authority), 1),
-                5,
-            )
 
             db.table("memory_items").insert({
                 "project_id": project_id,
                 "type": item_type,
-                "title": (item.get("title") or "")[:120],
-                "content": (item.get("content") or "")[:2000],
-                "authority": authority,
-                "tags": item.get("tags", []),
+                "title": (item.get("title", "") or "")[:120],
+                "content": (item.get("content", "") or "")[:2000],
+                "authority": {"high": 3, "medium": 2, "low": 1}.get(
+                    item.get("confidence", "medium"), 2
+                ),
                 "metadata": {
-                    "extracted_by": "interview_agent_hook2",
-                    "phase": phase,
+                    "source": item.get("source", ""),
+                    "phase": item.get("phase", ""),
+                    "session_id": item.get("session_id", ""),
+                    "extracted_by": "interview_agent_memory_hook",
                 },
             }).execute()
-            written += 1
-
-        logger.info(
-            "Extracted %d memory items from %s phase for project %s",
-            written, phase, project_id,
-        )
-    except Exception as exc:
-        logger.debug("Memory item storage failed: %s", exc)
-
-    return written
+    except Exception:
+        pass  # DB not available
 
 
-def _parse_extraction_response(text: str) -> list[dict]:
-    """Parse the LLM extraction response into a list of memory items."""
-    import re
+# ── HOOK 3: Session end — full conversation → mem0 + consolidate ─────────
 
-    # Try direct JSON parse
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-        return []
-    except (json.JSONDecodeError, TypeError):
-        pass
+def persist_session(state: InterviewState, decision_log: DecisionLog) -> dict:
+    """Persist the full session to longitudinal memory.
 
-    # Try extracting from markdown code block
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if match:
-        try:
-            result = json.loads(match.group(1))
-            if isinstance(result, list):
-                return result
-        except (json.JSONDecodeError, TypeError):
-            pass
+    1. Feed conversation to mem0 (deduplication + extraction)
+    2. Write decision log items to DB
+    3. Run consolidation to supersede stale decisions
+    4. Rebuild the compact index
 
-    return []
-
-
-# ── Hook 3: Session End — Persist to mem0 + Consolidate ─────────────────
-
-def persist_session_to_memory(state: InterviewState) -> dict:
-    """Feed the full conversation to mem0 and run consolidation.
-
-    Called when the session reaches the 'complete' phase. This:
-    1. Feeds the conversation history to mem0's add_memories()
-    2. Runs consolidation + supersede on the project's memory_items
-    3. Rebuilds the compact index
-
-    Returns a dict with stats about what was persisted.
+    Returns stats dict.
     """
     project_id = state.get("project_id", "")
     user_id = state.get("user_id", "")
     messages = state.get("messages", [])
-    session_id = state.get("session_id", "")
 
     stats = {
-        "mem0_added": 0,
-        "consolidated": False,
+        "mem0_stored": 0,
+        "decision_log_items": len(decision_log.get_all()),
+        "consolidation_run": False,
         "index_rebuilt": False,
     }
 
-    if not project_id or not messages:
-        return stats
-
     # 1. Feed conversation to mem0
-    try:
-        from backend.services.memory import add_memories
+    if project_id and user_id and messages:
+        try:
+            from backend.services.memory import add_memories
+            mem0_messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in messages
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ]
+            if mem0_messages:
+                result = add_memories(mem0_messages, project_id, user_id)
+                stats["mem0_stored"] = len(result)
+        except Exception:
+            pass
 
-        # Format messages for mem0 (expects role/content dicts)
-        conversation = [
-            {"role": m.get("role", "assistant"), "content": m.get("content", "")}
-            for m in messages
-            if m.get("content")
-        ]
+    # 2. Persist any remaining decision log items to DB
+    remaining_items = decision_log.get_all()
+    if remaining_items:
+        _persist_to_db(state, remaining_items)
 
-        if conversation:
-            added = add_memories(
-                messages=conversation,
-                project_id=project_id,
-                user_id=user_id,
+    # 3. Run consolidation (supersede stale decisions)
+    if project_id:
+        try:
+            from backend.db.supabase_client import get_supabase
+            from datetime import datetime, timezone
+            db = get_supabase()
+
+            rows = (
+                db.table("memory_items")
+                .select("id, type, title, content, supersedes_id")
+                .eq("project_id", project_id)
+                .is_("effective_to", "null")
+                .in_("type", ["decision", "constraint"])
+                .order("created_at", desc=False)
+                .execute()
+                .data
+                or []
             )
-            stats["mem0_added"] = len(added)
-            logger.info(
-                "Persisted %d memories to mem0 for session %s",
-                len(added), session_id,
-            )
-    except Exception as exc:
-        logger.debug("mem0 persistence skipped: %s", exc)
 
-    # 2. Run consolidation + supersede on memory_items
-    try:
-        from backend.db.supabase_client import get_supabase
-        db = get_supabase()
+            seen: dict[tuple[str, str], dict] = {}
+            for row in rows:
+                key = (row["type"], row["title"].strip().lower())
+                if key not in seen:
+                    seen[key] = row
+                    continue
+                prior = seen[key]
+                if prior["content"].strip() == row["content"].strip():
+                    # Exact duplicate — supersede the older one
+                    db.table("memory_items").update({
+                        "effective_to": datetime.now(timezone.utc).isoformat(),
+                        "supersedes_id": prior["id"],
+                    }).eq("id", row["id"]).execute()
+                # Different content = conflict — leave both, let user resolve
 
-        rows = (
-            db.table("memory_items")
-            .select("id, type, title, content, supersedes_id")
-            .eq("project_id", project_id)
-            .is_("effective_to", "null")
-            .in_("type", ["decision", "constraint"])
-            .order("created_at", desc=False)
-            .execute()
-            .data
-            or []
-        )
+            stats["consolidation_run"] = True
+        except Exception:
+            pass
 
-        seen: dict[tuple[str, str], dict] = {}
-        for row in rows:
-            key = (row["type"], row["title"].strip().lower())
-            if key not in seen:
-                seen[key] = row
-                continue
-            prior = seen[key]
-            # Exact duplicate — supersede the older one
-            if prior["content"].strip() == row["content"].strip():
-                db.table("memory_items").update({
-                    "effective_to": datetime.now(timezone.utc).isoformat(),
-                    "supersedes_id": prior["id"],
-                }).eq("id", row["id"]).execute()
-
-        stats["consolidated"] = True
-        logger.info("Consolidation complete for project %s", project_id)
-    except Exception as exc:
-        logger.debug("Consolidation skipped: %s", exc)
-
-    # 3. Rebuild the compact index
-    try:
-        from backend.services.memory_index import rebuild_index_memory
-        rebuild_index_memory(project_id)
-        stats["index_rebuilt"] = True
-        logger.info("Index rebuilt for project %s", project_id)
-    except Exception as exc:
-        logger.debug("Index rebuild skipped: %s", exc)
+    # 4. Rebuild compact index
+    if project_id:
+        try:
+            from backend.services.memory_index import rebuild_index_memory
+            rebuild_index_memory(project_id)
+            stats["index_rebuilt"] = True
+        except Exception:
+            pass
 
     return stats
+
+
+# ── Context injection helper ─────────────────────────────────────────────
+
+def build_memory_context(
+    recalled: list[dict],
+    decision_log: DecisionLog,
+) -> str:
+    """Build a memory context block for injection into sub-agent prompts.
+
+    Combines recalled DB memories with the local decision log into a
+    single text block that sub-agents can reference.
+    """
+    parts: list[str] = []
+
+    # Recalled memories from past sessions
+    if recalled:
+        parts.append("=== Past Session Memory ===")
+        for mem in recalled:
+            mtype = mem.get("type", "memory")
+            title = mem.get("title", "")
+            content = mem.get("content", "")
+            if title:
+                parts.append(f"[{mtype}] {title}: {content[:200]}")
+            else:
+                parts.append(f"[{mtype}] {content[:250]}")
+
+    # Current session decision log
+    log_summary = decision_log.summary()
+    if log_summary:
+        parts.append("")
+        parts.append("=== Current Session Decisions ===")
+        parts.append(log_summary)
+
+    return "\n".join(parts)

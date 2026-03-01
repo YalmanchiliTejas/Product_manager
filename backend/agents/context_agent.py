@@ -154,11 +154,14 @@ def run_context_agent(state: InterviewState) -> dict:
     Returns a context_pack dict with:
       - interview_context: relevant chunks from loaded interviews
       - db_context: memory items + evidence chunks from DB (if available)
+      - recalled_memories: past session memories injected by the orchestrator
+      - memory_context_text: formatted text block for sub-agent prompt injection
       - assessment: what the LLM decided was needed
     """
     question = state["current_question"]
     interview_data = state.get("interview_data", [])
     project_id = state.get("project_id", "")
+    recalled = state.get("recalled_memories", [])
 
     # Summarise available interviews for the assessment
     summaries = []
@@ -181,8 +184,27 @@ def run_context_agent(state: InterviewState) -> dict:
     if project_id:
         db_context = _fetch_db_context(project_id, question, needs)
 
+    # 4. Build formatted memory context for prompt injection
+    memory_context_text = ""
+    if recalled:
+        mem_lines = []
+        for mem in recalled:
+            mtype = mem.get("type", "memory")
+            title = mem.get("title", "")
+            content = mem.get("content", "")
+            if title:
+                mem_lines.append(f"- [{mtype}] {title}: {content[:200]}")
+            else:
+                mem_lines.append(f"- [{mtype}] {content[:250]}")
+        memory_context_text = (
+            "Relevant knowledge from past sessions:\n"
+            + "\n".join(mem_lines)
+        )
+
     return {
         "assessment": needs,
         "interview_context": interview_context,
         "db_context": db_context,
+        "recalled_memories": recalled,
+        "memory_context_text": memory_context_text,
     }
