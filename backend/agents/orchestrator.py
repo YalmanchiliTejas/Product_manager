@@ -29,6 +29,13 @@ from backend.agents.context_agent import run_context_agent
 from backend.agents.research_agent import run_research_agent
 from backend.agents.prd_agent import run_prd_agent
 from backend.agents.ticket_agent import run_ticket_agent
+from backend.agents.memory_hooks import (
+    DecisionLog,
+    recall_memories,
+    persist_phase,
+    persist_session,
+    build_memory_context,
+)
 from backend.services.llm import get_fast_llm
 
 
@@ -255,7 +262,11 @@ def confirm_tasks_node(state: InterviewState) -> dict:
 
 
 def dispatch_research_node(state: InterviewState) -> dict:
-    """Run research + context agents (would run in parallel in production)."""
+    """Run research + context agents (would run in parallel in production).
+
+    Memory hook: after research completes, extract structured memory items
+    (decisions, constraints, metrics) and persist to the decision log.
+    """
     tasks = state.get("tasks", [])
     messages = state.get("messages", [])
 
@@ -268,6 +279,11 @@ def dispatch_research_node(state: InterviewState) -> dict:
 
     # Run context agent
     context_pack = run_context_agent(state)
+
+    # Inject recalled memories into context pack so downstream agents see them
+    recalled = state.get("recalled_memories", [])
+    if recalled:
+        context_pack["recalled_memories"] = recalled
 
     # Run research agent
     research_results = run_research_agent(state)
@@ -497,11 +513,18 @@ def build_interview_graph():
 class InterviewSession:
     """Manages a stateful interview agent session with REPL-style interaction.
 
+    Includes longitudinal memory:
+      - DecisionLog tracks decisions/constraints/metrics within the session
+      - recall_memories() fetches past session data at question start
+      - persist_phase() stores structured items after each agent phase
+      - persist_session() writes everything to mem0 + consolidates at end
+
     Usage:
         session = InterviewSession(interview_data=[...])
         session.start()               # initial intake
         session.ask("What are the top user pain points?")  # run full pipeline
         session.ask("Create a PRD for the onboarding flow")
+        session.end()                  # persist to longitudinal memory
     """
 
     def __init__(
@@ -511,6 +534,7 @@ class InterviewSession:
         project_id: str = "",
         user_id: str = "cli-user",
     ):
+        self.decision_log = DecisionLog()
         self.state: InterviewState = {
             "session_id": str(uuid.uuid4()),
             "project_id": project_id or str(uuid.uuid4()),
@@ -524,6 +548,7 @@ class InterviewSession:
             "context_pack": {},
             "prd_document": {},
             "tickets": [],
+            "recalled_memories": [],
             "phase": "intake",
             "iteration": 0,
             "user_response": None,
@@ -540,6 +565,9 @@ class InterviewSession:
     def ask(self, question: str, auto_confirm: bool = False) -> list[dict]:
         """Submit a question and run the full pipeline.
 
+        HOOK 1: Recalls relevant past memories before analysis.
+        HOOK 2: Persists structured items after research, PRD, and tickets.
+
         If auto_confirm=True, tasks are auto-confirmed without waiting.
         Otherwise the pipeline pauses at confirm_tasks and the caller
         should call confirm() / reject().
@@ -548,6 +576,10 @@ class InterviewSession:
         self.state["phase"] = "waiting"
         self.state["user_response"] = None
         self.state["messages"].append({"role": "user", "content": question})
+
+        # HOOK 1: Recall past memories for this question
+        recall_result = recall_memories(self.state, self.decision_log)
+        self.state = {**self.state, **recall_result}
 
         # Run analysis + planning
         self.state = {**self.state, **analyze_question_node(self.state)}
@@ -559,14 +591,24 @@ class InterviewSession:
 
             if self.state["phase"] == "researching":
                 self.state = {**self.state, **dispatch_research_node(self.state)}
+
+                # HOOK 2a: Persist research findings
+                persist_phase(self.state, self.decision_log, "research")
+
                 self.state = {**self.state, **generate_prd_node(self.state)}
 
                 if self.state.get("prd_document"):
+                    # HOOK 2b: Persist PRD decisions
+                    persist_phase(self.state, self.decision_log, "prd")
+
                     self.state["user_response"] = {"text": "approve"}
                     self.state = {**self.state, **review_prd_node(self.state)}
 
                     if self.state["phase"] == "ticketing":
                         self.state = {**self.state, **create_tickets_node(self.state)}
+
+                        # HOOK 2c: Persist ticket plan
+                        persist_phase(self.state, self.decision_log, "tickets")
 
                 self.state = {**self.state, **present_results_node(self.state)}
 
@@ -580,7 +622,15 @@ class InterviewSession:
 
         if self.state["phase"] == "researching":
             self.state = {**self.state, **dispatch_research_node(self.state)}
+
+            # HOOK 2a: Persist research findings
+            persist_phase(self.state, self.decision_log, "research")
+
             self.state = {**self.state, **generate_prd_node(self.state)}
+
+            if self.state.get("prd_document"):
+                # HOOK 2b: Persist PRD decisions
+                persist_phase(self.state, self.decision_log, "prd")
 
         return self._new_messages()
 
@@ -593,8 +643,38 @@ class InterviewSession:
         if self.state["phase"] == "ticketing":
             self.state = {**self.state, **create_tickets_node(self.state)}
 
+            # HOOK 2c: Persist ticket plan
+            persist_phase(self.state, self.decision_log, "tickets")
+
         self.state = {**self.state, **present_results_node(self.state)}
         return self._new_messages()
+
+    def end(self) -> dict:
+        """HOOK 3: Persist full session to longitudinal memory.
+
+        Call this when the user is done with the session.  Feeds the
+        full conversation to mem0, runs consolidation, rebuilds index.
+
+        Returns stats dict with counts of what was persisted.
+        """
+        stats = persist_session(self.state, self.decision_log)
+
+        self.state["messages"].append({
+            "role": "assistant",
+            "content": (
+                f"Session saved to memory. "
+                f"Stored {stats.get('mem0_stored', 0)} mem0 memories, "
+                f"{stats.get('decision_log_items', 0)} decision log items."
+                + (" Consolidation complete." if stats.get("consolidation_run") else "")
+                + (" Index rebuilt." if stats.get("index_rebuilt") else "")
+            ),
+        })
+
+        return stats
+
+    def get_decision_log(self) -> list[dict]:
+        """Return the session's decision log (all extracted items)."""
+        return self.decision_log.get_all()
 
     def get_tasks(self) -> list[TaskItem]:
         """Return current task list."""

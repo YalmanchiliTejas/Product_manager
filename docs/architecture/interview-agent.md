@@ -18,6 +18,155 @@ the CLI `--provider` flag. Supports: Anthropic, OpenAI, Ollama, Groq, Azure.
 
 ---
 
+## Quick Start — Setup & Run
+
+### Prerequisites
+
+```bash
+# Python 3.10+
+python --version
+
+# Install dependencies (from project root)
+pip install -r requirements.txt
+```
+
+### Environment Variables
+
+Create a `.env` file in the project root (or export these):
+
+```bash
+# Required — pick ONE LLM provider:
+LLM_PROVIDER=anthropic          # or: openai, ollama, groq, azure_openai
+
+# Provider API key (match your LLM_PROVIDER):
+ANTHROPIC_API_KEY=sk-ant-...    # if LLM_PROVIDER=anthropic
+# OPENAI_API_KEY=sk-...         # if LLM_PROVIDER=openai
+# GROQ_API_KEY=gsk_...          # if LLM_PROVIDER=groq
+
+# Optional — model overrides:
+# FAST_MODEL=claude-haiku-4-5-20251001
+# STRONG_MODEL=claude-sonnet-4-6
+
+# Optional — for longitudinal memory persistence (DB-backed):
+# SUPABASE_URL=https://xxx.supabase.co
+# SUPABASE_SERVICE_ROLE_KEY=eyJ...
+# DATABASE_URL=postgresql://postgres:...@db.xxx.supabase.co:5432/postgres
+
+# Optional — for embeddings (needed for DB-backed memory):
+# EMBEDDING_PROVIDER=openai
+# EMBEDDING_MODEL=text-embedding-3-small
+```
+
+**Minimum to run:** Just `LLM_PROVIDER` + the matching API key. Everything
+else is optional. The agent works fully without a database — memory persists
+within the session via the in-memory DecisionLog.
+
+### Run the CLI
+
+```bash
+# Basic — parse interviews from a folder and start REPL
+python -m backend.agents.cli ./path/to/interviews/
+
+# With provider switching
+python -m backend.agents.cli ./interviews/ --provider openai --model gpt-4o
+python -m backend.agents.cli ./interviews/ --provider ollama --model llama3
+python -m backend.agents.cli ./interviews/ --provider groq --model mixtral-8x7b
+
+# With market context
+python -m backend.agents.cli ./interviews/ --market "B2B SaaS targeting SMBs, $50B TAM"
+
+# Non-interactive (single question, auto-confirm, exports to ./output/)
+python -m backend.agents.cli ./interviews/ --auto "What are the top user pain points?"
+
+# With API key inline
+python -m backend.agents.cli ./interviews/ --provider anthropic --api-key sk-ant-...
+```
+
+### Interview File Formats
+
+Place your files in a folder. Supported formats:
+
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| Plain text | `.txt` | Interview transcripts, notes |
+| Markdown | `.md` | Formatted notes, summaries |
+| CSV | `.csv` | Survey responses, NPS data |
+| PDF | `.pdf` | Requires `pypdf` (already in requirements) |
+| JSON | `.json` | Structured data, arrays of responses |
+
+The parser auto-detects speaker labels (`Name:`, `[Name]`, `Q:/A:`) and
+timestamps (`HH:MM:SS`, `MM:SS`).
+
+### REPL Commands
+
+Once in the REPL:
+
+```
+/tasks     — show current task list with status icons
+/prd       — show generated PRD (markdown)
+/tickets   — show generated tickets
+/decisions — show decisions/constraints extracted this session
+/export    — export PRD + tickets to ./output/
+/auto <q>  — ask with auto-confirm (no task confirmation step)
+/save      — persist session to longitudinal memory now
+/phase     — show current agent phase
+/help      — show all commands
+/quit      — exit (auto-saves to memory)
+```
+
+### Run the API Server
+
+```bash
+# Start FastAPI
+uvicorn backend.main:app --reload --port 8000
+
+# Then use the interview endpoints:
+# POST /api/interview/sessions         — create session
+# POST /api/interview/sessions/{id}/ask — submit question
+# etc. (see API docs at http://localhost:8000/docs)
+```
+
+### Run DB Migrations (optional, for persistence)
+
+```bash
+# Apply in your Supabase SQL editor or via psql:
+psql $DATABASE_URL -f db/migrations/0001_pgvector_semantic_search.sql
+psql $DATABASE_URL -f db/migrations/0002_memory_context_pack.sql
+psql $DATABASE_URL -f db/migrations/0003_interview_agent.sql
+```
+
+### Test It
+
+```bash
+# 1. Create a folder with sample interviews
+mkdir -p ./test_interviews
+echo "Interviewer: What's your biggest pain point?
+User: The onboarding is confusing. I couldn't figure out how to set up my first project.
+Interviewer: How often do you use the product?
+User: Daily, but I avoid the analytics dashboard because it's too slow." > ./test_interviews/user_interview_1.txt
+
+# 2. Run the agent
+python -m backend.agents.cli ./test_interviews/
+
+# 3. Ask a question
+# > What are the main pain points?
+# (agent analyses, extracts claims, generates research report)
+
+# 4. Confirm tasks when prompted
+# > yes
+
+# 5. Review the PRD
+# > approve
+
+# 6. Check outputs
+# /prd
+# /tickets
+# /decisions
+# /export
+```
+
+---
+
 ## File Map
 
 ```
@@ -28,6 +177,7 @@ backend/agents/
 ├── state.py             # Shared state TypedDict + helper models
 ├── doc_parser.py        # Document parser (folder → structured interview data)
 ├── orchestrator.py      # Main LangGraph graph + InterviewSession class
+├── memory_hooks.py      # Longitudinal memory: recall, persist, consolidate
 ├── context_agent.py     # Dynamic context fetcher sub-agent
 ├── research_agent.py    # Deep research sub-agent
 ├── prd_agent.py         # PRD generator sub-agent
@@ -216,7 +366,9 @@ intake → analyze_question → plan_tasks → confirm_tasks
   - `.ask(question, auto_confirm=False)` — submit question, run pipeline
   - `.confirm(response)` — confirm/reject tasks
   - `.review_prd(response)` — approve/revise PRD
+  - `.end()` — persist session to longitudinal memory
   - `.get_tasks()`, `.get_prd()`, `.get_tickets()` — access outputs
+  - `.get_decision_log()` — access extracted decisions/constraints
 
 **Key nodes:**
 - `intake_node` — counts loaded interviews, sets phase to "waiting"
@@ -370,6 +522,116 @@ entirely without them — all state is in-memory via `InterviewState`.
                     │  - Task list                          │
                     └──────────────────────────────────────┘
 ```
+
+## Longitudinal Memory Architecture
+
+The interview agent integrates with the existing memory infrastructure to
+persist decisions, constraints, metrics, and persona insights across sessions.
+
+### How It Works
+
+```
+Session N                              Session N+1
+=========                              ===========
+
+ ask("pain points?")                    ask("prioritize features")
+      │                                      │
+      ▼                                      ▼
+ HOOK 1: recall_memories()             HOOK 1: recall_memories()
+ (DB empty on first run)               ← recalls decisions from Session N
+      │                                      │
+      ▼                                      ▼
+ research + context + prd              research sees past decisions
+      │                                 PRD references past constraints
+      ▼                                      │
+ HOOK 2: persist_phase()               HOOK 2: persist_phase()
+ → extracts: "80% cite onboarding      → extracts: "Prioritize onboarding
+    friction" (metric)                     over analytics" (decision)
+ → extracts: "Must support offline"    → writes to DecisionLog + DB
+    (constraint)                             │
+ → writes to DecisionLog + DB               ▼
+      │                                 HOOK 3: persist_session()
+      ▼                                 → conversation → mem0
+ HOOK 3: persist_session()             → consolidate (supersede stale)
+ → conversation → mem0                 → rebuild compact index
+ → consolidate duplicates
+ → rebuild compact index
+```
+
+### Three Hooks
+
+| Hook | When | What it does |
+|------|------|-------------|
+| **recall_memories** | Before each question | Searches mem0 + memory_items + local DecisionLog for relevant past context. Injects into state so all sub-agents see it. |
+| **persist_phase** | After research, PRD, tickets | LLM extracts structured items (decisions, constraints, metrics, personas) from the phase output. Writes to DecisionLog (always) + memory_items table (if DB connected). |
+| **persist_session** | On `/quit`, `/save`, or `.end()` | Feeds full conversation to mem0 for deduplication. Runs consolidation to supersede stale decisions. Rebuilds the compact memory index. |
+
+### DecisionLog (In-Memory)
+
+Every session has a `DecisionLog` that works without a database:
+
+```python
+session.get_decision_log()
+# → [
+#   {"type": "metric", "title": "Onboarding friction rate",
+#    "content": "80% of users cited onboarding confusion", "confidence": "high"},
+#   {"type": "decision", "title": "Prioritize self-serve onboarding",
+#    "content": "Build guided setup wizard before API access", "confidence": "high"},
+#   {"type": "constraint", "title": "Offline support required",
+#    "content": "Must work without internet for field sales team", "confidence": "medium"},
+# ]
+```
+
+Use `/decisions` in the CLI to see these at any time.
+
+### DB-Backed Persistence (Optional)
+
+When `SUPABASE_URL` + `DATABASE_URL` are configured:
+
+1. **persist_phase** writes to `memory_items` table with:
+   - `type`: decision, constraint, metric, or persona
+   - `authority`: 1 (low confidence) → 3 (high confidence)
+   - `metadata.extracted_by`: "interview_agent_memory_hook"
+   - `metadata.phase`: which phase produced this item
+   - `metadata.session_id`: traceability back to the session
+
+2. **persist_session** runs consolidation:
+   - Finds duplicate titles within the same type
+   - Exact content match → supersedes the older one (`effective_to` set)
+   - Different content = conflict → both kept (user resolves)
+   - Rebuilds the compact always-on index
+
+3. **recall_memories** searches both:
+   - `mem0` memories (semantic, conversation-derived)
+   - `memory_items` (structured: decisions, constraints, metrics, personas)
+
+### What Gets Remembered
+
+| Phase | Extracted Types | Example |
+|-------|----------------|---------|
+| Research | metrics, constraints | "80% cite onboarding friction", "Must support SSO" |
+| PRD | decisions, constraints, metrics | "Build wizard before API", "Target: 50% reduction in time-to-first-value" |
+| Tickets | decisions | "Sprint 1: onboarding epic (21 points)" |
+| Full conversation | mem0 memories | Deduped facts, preferences, open questions |
+
+### Testing Memory Across Sessions
+
+```bash
+# Session 1
+python -m backend.agents.cli ./interviews/ --project-id my-project
+> What are the main pain points?
+> yes
+> approve
+/decisions   # see what was extracted
+/quit        # auto-saves to memory
+
+# Session 2 — same project-id, recalls Session 1
+python -m backend.agents.cli ./interviews/ --project-id my-project
+> Create a PRD for onboarding improvements
+# Agent now sees: "80% cite onboarding friction" from Session 1
+```
+
+---
 
 ## Extending the System
 

@@ -134,6 +134,11 @@ def _build_prd_prompt(
         )
         parts.append(f"Project Memory:\n{mem_lines}\n")
 
+    # Recalled memories from past sessions (longitudinal context)
+    memory_text = context.get("memory_context_text", "")
+    if memory_text:
+        parts.append(f"{memory_text}\n")
+
     # Confirmed tasks
     confirmed_tasks = [t for t in tasks if t.get("status") == "confirmed"]
     if confirmed_tasks:
