@@ -142,7 +142,13 @@ def run_ticket_agent(state: InterviewState) -> list[dict]:
     """Entry point called by the orchestrator.
 
     Returns a flat list of TicketItem dicts with parent_id references.
+
+    LLM response is cached by sha256(prd_content) so the same PRD never
+    triggers a second API call within or across sessions.
     """
+    import hashlib
+    from backend.services import cache_manager
+
     prd = state.get("prd_document", {})
 
     if not prd:
@@ -168,17 +174,30 @@ def run_ticket_agent(state: InterviewState) -> list[dict]:
             ))
         prd_text = "\n\n".join(parts)
 
+    # Check LLM response cache (keyed on PRD content hash)
+    prd_hash = hashlib.sha256(prd_text.encode()).hexdigest()
+    cached_response = cache_manager.get_llm_response(prd_hash)
+    if cached_response:
+        try:
+            nested_tickets = json.loads(cached_response)
+            if isinstance(nested_tickets, list):
+                return _flatten_tickets(nested_tickets)
+        except (json.JSONDecodeError, TypeError):
+            pass  # corrupt cache — regenerate
+
     llm = get_strong_llm()
     response = llm.invoke([
         SystemMessage(content=_TICKET_GENERATION_PROMPT),
         HumanMessage(content=f"PRD:\n\n{prd_text}"),
     ])
 
+    raw_content = response.content if isinstance(response.content, str) else str(response.content)
+
     # Parse response
     try:
-        nested_tickets = json.loads(response.content)
+        nested_tickets = json.loads(raw_content)
     except (json.JSONDecodeError, TypeError):
-        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", response.content)
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw_content)
         if match:
             try:
                 nested_tickets = json.loads(match.group(1))
@@ -189,6 +208,10 @@ def run_ticket_agent(state: InterviewState) -> list[dict]:
 
     if not isinstance(nested_tickets, list):
         nested_tickets = [nested_tickets] if nested_tickets else []
+
+    # Cache the successful LLM response
+    if nested_tickets:
+        cache_manager.store_llm_response(prd_hash, json.dumps(nested_tickets))
 
     # Flatten into ticket list
     return _flatten_tickets(nested_tickets)

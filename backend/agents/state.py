@@ -111,6 +111,11 @@ class InterviewState(TypedDict):
     # Longitudinal memory
     recalled_memories: list[dict]   # memories recalled at session/question start
 
+    # ReAct loop + caching telemetry
+    page_index_trees: dict          # interview_id -> PageIndexTree dict (built lazily)
+    tool_call_log: list             # [{tool, args, result_preview, tokens_used, cached}]
+    cache_stats: dict               # {hits, misses, tokens_saved}
+
     # Control flow
     phase: str                      # intake|waiting|planning|researching|generating|ticketing|complete
     iteration: int

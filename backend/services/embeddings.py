@@ -70,11 +70,22 @@ def create_embedding(text: str) -> list[float]:
     Returns a list of floats (dimension depends on model — 1536 for
     text-embedding-3-small, 3072 for text-embedding-3-large).
     Raises ValueError for empty input.
+
+    Results are cached in SQLite (~/.cache/pm_agent/embeddings.db) to
+    avoid redundant API calls across sessions.
     """
     normalized = text.strip()
     if not normalized:
         raise ValueError("Cannot embed empty text.")
-    return _get_embedder().embed_query(normalized)
+
+    from backend.services import cache_manager
+    cached = cache_manager.get_embedding_cached(normalized)
+    if cached is not None:
+        return cached
+
+    vector = _get_embedder().embed_query(normalized)
+    cache_manager.store_embedding(normalized, vector)
+    return vector
 
 
 def to_pgvector_literal(vector: list[float]) -> str:

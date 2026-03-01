@@ -440,6 +440,35 @@ def persist_session(state: InterviewState, decision_log: DecisionLog) -> dict:
     return stats
 
 
+# ── Lightweight per-ask mem0 persist ─────────────────────────────────────
+
+def persist_to_mem0(state: InterviewState) -> None:
+    """Persist recent conversation turns to mem0 without full consolidation.
+
+    Called after each significant phase (research complete, PRD approved,
+    tickets created) so durability doesn't depend on session.end() being
+    called.  mem0 deduplicates internally, so repeated calls are safe.
+    """
+    project_id = state.get("project_id", "")
+    user_id = state.get("user_id", "")
+    messages = state.get("messages", [])
+
+    if not project_id or not user_id or not messages:
+        return
+
+    try:
+        from backend.services.memory import add_memories
+        recent = [
+            {"role": m["role"], "content": m["content"]}
+            for m in messages[-30:]  # last 30 turns to bound cost
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+        if recent:
+            add_memories(recent, project_id, user_id)
+    except Exception:
+        pass  # mem0 unavailable — structured items already persisted by Hook 2
+
+
 # ── Context injection helper ─────────────────────────────────────────────
 
 def build_memory_context(

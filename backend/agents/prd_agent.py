@@ -240,25 +240,23 @@ def _render_prd_markdown(prd: dict) -> str:
 def run_prd_agent(state: InterviewState) -> dict:
     """Entry point called by the orchestrator.
 
+    Delegates to the ReAct loop engine (react_loop.run) which gathers
+    evidence via tools before writing the PRD.
+
     Returns a PRD dict with all structured fields + full_markdown.
     """
-    question = state["current_question"]
-    research = state.get("research_results", {})
-    context = state.get("context_pack", {})
-    tasks = state.get("tasks", [])
+    from backend.agents import react_loop
 
-    prompt_text = _build_prd_prompt(question, research, context, tasks)
+    loop_result = react_loop.run(state, "prd")
+    prd = loop_result["result"]
 
-    llm = get_strong_llm()
-    response = llm.invoke([
-        SystemMessage(content=_PRD_GENERATION_PROMPT),
-        HumanMessage(content=prompt_text),
-    ])
+    # Merge tool_call_log into state
+    log = state.get("tool_call_log")
+    if isinstance(log, list):
+        log.extend(loop_result.get("tool_call_log", []))
 
-    prd = _parse_prd_response(response.content)
+    # Render markdown and set defaults
     prd["full_markdown"] = _render_prd_markdown(prd)
-
-    # Extract citation IDs if present
     prd.setdefault("cited_chunk_ids", [])
     prd.setdefault("cited_memory_ids", [])
 

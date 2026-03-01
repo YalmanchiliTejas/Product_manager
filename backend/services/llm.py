@@ -126,3 +126,33 @@ def get_strong_llm() -> BaseChatModel:
     Maps to STRONG_MODEL env var (default: claude-sonnet-4-6).
     """
     return _build_llm(settings.strong_model, max_tokens=6144)
+
+
+def get_thinking_llm() -> BaseChatModel:
+    """Return a Claude model configured for extended thinking + prompt caching.
+
+    Only available when LLM_PROVIDER=anthropic.  Falls back to get_strong_llm()
+    for other providers.
+
+    Enables:
+      - interleaved-thinking-2025-05-14  (thinking blocks alongside tool use)
+      - prompt-caching-2024-07-31        (Anthropic-side prompt caching)
+    """
+    if settings.llm_provider != "anthropic":
+        return get_strong_llm()
+
+    try:
+        from langchain_anthropic import ChatAnthropic
+    except ImportError:
+        return get_strong_llm()
+
+    return ChatAnthropic(
+        model=settings.strong_model,
+        api_key=settings.anthropic_api_key,
+        max_tokens=16000,
+        model_kwargs={
+            "extra_headers": {
+                "anthropic-beta": "interleaved-thinking-2025-05-14,prompt-caching-2024-07-31"
+            }
+        },
+    )

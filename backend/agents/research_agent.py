@@ -220,40 +220,27 @@ def _synthesise_findings(
 def run_research_agent(state: InterviewState) -> dict:
     """Entry point called by the orchestrator.
 
-    Pipeline: extract claims → search internal → search DB → synthesise.
+    Delegates to the ReAct loop engine (react_loop.run) which uses
+    PageIndex tree retrieval and parallel tool dispatch.
 
-    Returns structured research results dict.
+    Returns structured research results dict (same shape as before):
+      validated_claims, contradictions, quantified_metrics, gaps,
+      key_themes, summary, raw_claims, claim_count, internal_evidence_count
     """
-    question = state["current_question"]
-    interview_data = state.get("interview_data", [])
-    project_id = state.get("project_id", "")
+    from backend.agents import react_loop
 
-    # Build combined interview text for claim extraction
-    interview_texts: list[str] = []
-    for doc in interview_data:
-        header = f"--- {doc.get('filename', 'unknown')} ---"
-        interview_texts.append(f"{header}\n{doc.get('content', '')[:3000]}")
-    combined_text = "\n\n".join(interview_texts)
+    loop_result = react_loop.run(state, "research")
+    research = loop_result["result"]
 
-    # 1. Extract claims
-    claims = _extract_claims(question, combined_text)
+    # Merge tool_call_log into state (state is a mutable dict; list mutation persists)
+    log = state.get("tool_call_log")
+    if isinstance(log, list):
+        log.extend(loop_result.get("tool_call_log", []))
 
-    # 2. Search loaded interviews for evidence
-    internal_findings = _search_internal_evidence(interview_data, claims)
-
-    # 3. Search DB for additional evidence
-    db_findings: list[dict] = []
-    if project_id:
-        db_findings = _search_db_evidence(project_id, claims)
-
-    # 4. Synthesise everything
-    research = _synthesise_findings(question, claims, internal_findings, db_findings)
-
-    # Attach raw claims for traceability
-    research["raw_claims"] = claims
-    research["claim_count"] = len(claims)
-    research["internal_evidence_count"] = sum(
-        f["evidence_count"] for f in internal_findings
-    )
+    # Ensure backward-compatible summary fields
+    research.setdefault("raw_claims", [])
+    research.setdefault("validated_claims", [])
+    research["claim_count"] = len(research.get("validated_claims", []))
+    research["internal_evidence_count"] = len(research.get("validated_claims", []))
 
     return research

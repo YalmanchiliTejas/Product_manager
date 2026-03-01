@@ -63,29 +63,55 @@ def _assess_context_needs(question: str, interview_summary: str) -> dict:
 def _build_interview_context(interview_data: list[dict], question: str) -> dict:
     """Build context from the locally-loaded interview data (no DB needed).
 
-    Searches interview chunks for relevance to the question using simple
-    keyword overlap scoring.
+    Uses PageIndex two-phase LLM retrieval instead of keyword overlap scoring.
+    Falls back to keyword scoring if PageIndex fails for any document.
     """
-    question_words = set(question.lower().split())
-    scored_chunks: list[tuple[float, str, str]] = []
+    from backend.agents import page_index
+    from backend.services.llm import get_fast_llm
+
+    llm = get_fast_llm()
+    relevant_chunks: list[dict] = []
+    total_chunks = 0
 
     for doc in interview_data:
         filename = doc.get("filename", "unknown")
-        for chunk in doc.get("chunks", []):
-            chunk_words = set(chunk.lower().split())
-            overlap = len(question_words & chunk_words) / max(len(question_words), 1)
-            scored_chunks.append((overlap, filename, chunk))
+        content = doc.get("content", "")
+        total_chunks += len(doc.get("chunks", []))
 
-    scored_chunks.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = scored_chunks[:10]
+        if not content.strip():
+            continue
+
+        try:
+            tree = page_index.build_index(filename, content, llm)
+            sections = page_index.retrieve(tree, question, content, llm)
+            for section in sections:
+                relevant_chunks.append({
+                    "source": filename,
+                    "content": section["content"],
+                    "relevance": 0.9,  # LLM-selected; treat as high relevance
+                    "node_title": section.get("title", ""),
+                    "reasoning": section.get("relevance_reasoning", ""),
+                })
+        except Exception:
+            # Fallback: keyword overlap on chunks
+            question_words = set(question.lower().split())
+            for chunk in doc.get("chunks", []):
+                chunk_words = set(chunk.lower().split())
+                overlap = len(question_words & chunk_words) / max(len(question_words), 1)
+                if overlap > 0.1:
+                    relevant_chunks.append({
+                        "source": filename,
+                        "content": chunk,
+                        "relevance": round(overlap, 3),
+                    })
+
+    # Keep top 10 by relevance
+    relevant_chunks.sort(key=lambda x: x.get("relevance", 0), reverse=True)
 
     return {
-        "relevant_chunks": [
-            {"source": fname, "content": content, "relevance": round(score, 3)}
-            for score, fname, content in top_chunks
-        ],
+        "relevant_chunks": relevant_chunks[:10],
         "total_sources_searched": len(interview_data),
-        "total_chunks_searched": sum(len(d.get("chunks", [])) for d in interview_data),
+        "total_chunks_searched": total_chunks,
     }
 
 
