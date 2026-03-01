@@ -35,13 +35,23 @@ API overview:
     GET    /api/memory/{project_id}/{user_id} — List all memories for a project/user
     DELETE /api/memory/{memory_id}            — Delete a specific memory
 
+    # Interview Agent
+    POST   /api/interview/sessions              — Create interview session
+    GET    /api/interview/sessions/{id}         — Get session state
+    POST   /api/interview/sessions/{id}/ask     — Submit a question
+    POST   /api/interview/sessions/{id}/confirm — Confirm/reject tasks
+    POST   /api/interview/sessions/{id}/review  — Approve/revise PRD
+    GET    /api/interview/sessions/{id}/tasks   — Get task list
+    GET    /api/interview/sessions/{id}/prd     — Get generated PRD
+    GET    /api/interview/sessions/{id}/tickets — Get generated tickets
+
     GET    /health                            — Liveness check
 """
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import memory, projects, search, sources, synthesis
+from backend.routers import interview, memory, projects, search, sources, synthesis
 
 app = FastAPI(
     title="Product Manager AI Backend",
@@ -68,6 +78,7 @@ app.include_router(sources.router)
 app.include_router(search.router)
 app.include_router(synthesis.router)
 app.include_router(memory.router)
+app.include_router(interview.router)
 
 
 @app.get("/health", tags=["meta"])

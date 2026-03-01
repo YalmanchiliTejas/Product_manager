@@ -247,3 +247,86 @@ class ContextPackResponse(BaseModel):
     memory_items: list[dict]
     evidence_chunks: list[dict]
     citations: dict
+
+
+# ---------------------------------------------------------------------------
+# Interview Agent
+# ---------------------------------------------------------------------------
+
+class InterviewSessionCreate(BaseModel):
+    project_id: str = Field(..., description="Parent project UUID.")
+    user_id: str = Field(..., description="PM user UUID.")
+    interview_data: list[dict] = Field(
+        default_factory=list,
+        description="Pre-parsed interview documents [{filename, content, chunks, metadata}].",
+    )
+    market_context: str = Field("", description="Free-text market context.")
+
+
+class InterviewSessionResponse(BaseModel):
+    session_id: str
+    project_id: str
+    user_id: str
+    phase: str
+    tasks: list[dict]
+    messages: list[dict]
+    prd_document: dict | None = None
+    tickets: list[dict] | None = None
+
+
+class InterviewAskRequest(BaseModel):
+    question: str = Field(..., min_length=1, description="The PM's question or directive.")
+    auto_confirm: bool = Field(
+        False,
+        description="If true, auto-confirm proposed tasks without waiting.",
+    )
+
+
+class InterviewConfirmRequest(BaseModel):
+    response: str = Field(
+        "yes",
+        description="Confirmation: 'yes', 'no', or modification text.",
+    )
+
+
+class InterviewReviewRequest(BaseModel):
+    response: str = Field(
+        "approve",
+        description="PRD review: 'approve', 'skip', or revision feedback.",
+    )
+
+
+class TaskItemResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    status: str
+    priority: int
+    agent: str
+    output: dict | None = None
+
+
+class PRDDocumentResponse(BaseModel):
+    title: str
+    problem_statement: str
+    user_stories: list[str]
+    proposed_solution: str
+    kpis: list[dict]
+    technical_requirements: list[str]
+    constraints_and_risks: list[str]
+    next_actions: list[dict]
+    full_markdown: str
+    cited_chunk_ids: list[str]
+    cited_memory_ids: list[str]
+
+
+class TicketResponse(BaseModel):
+    id: str
+    ticket_type: str
+    title: str
+    description: str
+    acceptance_criteria: list[str]
+    priority: str
+    estimated_points: int | None = None
+    parent_id: str | None = None
+    labels: list[str]
