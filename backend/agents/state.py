@@ -108,6 +108,9 @@ class InterviewState(TypedDict):
     prd_document: dict              # from PRD agent (PRDDocument-shaped)
     tickets: list[dict]             # from ticket agent (list of TicketItem)
 
+    # Memory (populated by memory hooks)
+    recalled_memories: list[dict]   # past decisions/constraints injected at session start
+
     # Control flow
     phase: str                      # intake|waiting|planning|researching|generating|ticketing|complete
     iteration: int

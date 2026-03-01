@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from backend.agents.orchestrator import InterviewSession
+from backend.agents.memory_hooks import persist_session_to_memory
 from backend.schemas.models import (
     InterviewAskRequest,
     InterviewConfirmRequest,
@@ -117,3 +118,20 @@ def get_tickets(session_id: str):
     if not tickets:
         raise HTTPException(status_code=404, detail="No tickets generated yet.")
     return {"tickets": tickets}
+
+
+@router.post("/sessions/{session_id}/end")
+def end_session(session_id: str):
+    """Explicitly end a session and persist all memories.
+
+    Triggers Hook 3: feeds the full conversation to mem0, runs
+    consolidation + supersede on memory_items, and rebuilds the
+    compact index. Call this when the user is done with the session.
+    """
+    session = _get_session(session_id)
+    stats = persist_session_to_memory(session.state)
+    return {
+        "session_id": session_id,
+        "status": "ended",
+        "memory_stats": stats,
+    }
