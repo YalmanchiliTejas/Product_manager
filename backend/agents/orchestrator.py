@@ -93,13 +93,22 @@ def intake_node(state: InterviewState) -> dict:
         "phase": "waiting",
         "messages": messages,
         "iteration": 0,
+        "recalled_memories": [],
     }
 
 
 def analyze_question_node(state: InterviewState) -> dict:
-    """Analyse the user's question and classify the work needed."""
+    """Analyse the user's question and classify the work needed.
+
+    Hook 1: Recalls past decisions/constraints/metrics before analysis
+    so the LLM can factor in prior context.
+    """
     question = state["current_question"]
     interview_data = state.get("interview_data", [])
+
+    # Hook 1 — Recall past decisions for this question
+    recall_result = recall_past_decisions(state)
+    recalled = recall_result.get("recalled_memories", [])
 
     # Summarise interviews for context
     summaries = []
@@ -108,12 +117,29 @@ def analyze_question_node(state: InterviewState) -> dict:
         summaries.append(f"- {doc.get('filename', '?')}: {meta.get('word_count', 0)} words")
     interview_summary = "\n".join(summaries) if summaries else "No interviews loaded."
 
+    # Include recalled context in the analysis prompt
+    prior_context = ""
+    if recalled:
+        context_lines = []
+        for mem in recalled:
+            if mem.get("source") == "mem0":
+                context_lines.append(f"- {mem.get('content', '')}")
+            else:
+                context_lines.append(
+                    f"- [{mem.get('type', 'info')}] {mem.get('title', '')}: {mem.get('content', '')}"
+                )
+        prior_context = (
+            "\n\nPrior context from past sessions:\n"
+            + "\n".join(context_lines)
+        )
+
     llm = get_fast_llm()
     response = llm.invoke([
         SystemMessage(content=_ANALYSIS_PROMPT),
         HumanMessage(content=(
             f"PM Question: {question}\n\n"
             f"Available interviews:\n{interview_summary}"
+            f"{prior_context}"
         )),
     ])
 
@@ -138,10 +164,17 @@ def analyze_question_node(state: InterviewState) -> dict:
                 "suggested_tasks": [],
             }
 
-    return {
+    result = {
         "phase": "planning",
         "user_response": analysis,
     }
+    # Merge in recalled memories and any injected messages from Hook 1
+    if recalled:
+        result["recalled_memories"] = recalled
+    if recall_result.get("messages"):
+        result["messages"] = recall_result["messages"]
+
+    return result
 
 
 def plan_tasks_node(state: InterviewState) -> dict:
@@ -309,12 +342,18 @@ def dispatch_research_node(state: InterviewState) -> dict:
         ),
     })
 
-    return {
+    result_state = {
         "research_results": research_results,
         "context_pack": context_pack,
         "tasks": tasks,
         "messages": messages,
     }
+
+    # Hook 2 — Extract and store research findings as memory items
+    merged = {**state, **result_state}
+    extract_and_store_research_memories(merged)
+
+    return result_state
 
 
 def generate_prd_node(state: InterviewState) -> dict:
@@ -349,12 +388,18 @@ def generate_prd_node(state: InterviewState) -> dict:
         ),
     })
 
-    return {
+    result_state = {
         "prd_document": prd,
         "tasks": tasks,
         "phase": "generating",
         "messages": messages,
     }
+
+    # Hook 2 — Extract and store PRD decisions as memory items
+    merged = {**state, **result_state}
+    extract_and_store_prd_memories(merged)
+
+    return result_state
 
 
 def review_prd_node(state: InterviewState) -> dict:
@@ -413,16 +458,29 @@ def create_tickets_node(state: InterviewState) -> dict:
         ),
     })
 
-    return {
+    result_state = {
         "tickets": tickets,
         "tasks": tasks,
         "phase": "complete",
         "messages": messages,
     }
 
+    # Hook 2 — Store ticket snapshot as memory item
+    merged = {**state, **result_state}
+    extract_and_store_ticket_memories(merged)
+
+    return result_state
+
 
 def present_results_node(state: InterviewState) -> dict:
-    """Final results node. User can loop back or end."""
+    """Final results node. User can loop back or end.
+
+    Hook 3: Persists the full conversation to mem0, runs consolidation
+    + supersede on memory_items, and rebuilds the compact index.
+    """
+    # Hook 3 — Persist session conversation to mem0 + consolidate
+    persist_session_to_memory(state)
+
     return {
         "phase": "complete",
         "iteration": state.get("iteration", 0) + 1,
