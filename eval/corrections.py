@@ -163,9 +163,9 @@ def annotate(run_id: str, case_id: str) -> None:
     if promote_ans == "yes":
         new_split = "train"
 
-    update_case_gold_outputs(case_path, gold_outputs, new_split)
+    updated_path = update_case_gold_outputs(case_path, gold_outputs, new_split)
     split_note = f" → split changed to 'train'" if new_split else ""
-    print(f"\n{_GREEN}Gold outputs saved to {case_path.name}{split_note}{_RESET}")
+    print(f"\n{_GREEN}Gold outputs saved to {updated_path.relative_to(CASES_DIR)}{split_note}{_RESET}")
 
 
 # ── promote ───────────────────────────────────────────────────────────────
@@ -183,8 +183,9 @@ def promote(case_id: str) -> None:
         print(f"{_DIM}Case '{case_id}' is already in split 'train'{_RESET}")
         return
 
-    update_case_gold_outputs(case._path, case.gold_outputs, new_split="train")
-    print(f"{_GREEN}Case '{case_id}' promoted to split 'train' (was '{case.split}'){_RESET}")
+    updated_path = update_case_gold_outputs(case._path, case.gold_outputs, new_split="train")
+    rel_path = updated_path.relative_to(CASES_DIR)
+    print(f"{_GREEN}Case '{case_id}' promoted to split 'train' (was '{case.split}') at {rel_path}{_RESET}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────

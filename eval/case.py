@@ -178,7 +178,7 @@ def update_case_gold_outputs(
     case_path: Path,
     gold_outputs: dict,
     new_split: str | None = None,
-) -> None:
+) -> Path:
     """Rewrite a case YAML file in-place with updated gold_outputs (and optional split change).
 
     Uses PyYAML round-trip to preserve structure. Comments are not preserved
@@ -188,10 +188,21 @@ def update_case_gold_outputs(
         raw = yaml.safe_load(f)
 
     raw["gold_outputs"] = gold_outputs
+
+    # Keep split label and filesystem location aligned.
+    destination_path = case_path
     if new_split is not None:
         raw["split"] = new_split
+        destination_dir = case_path.parent.parent / new_split
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination_path = destination_dir / case_path.name
 
-    tmp = case_path.with_suffix(".yaml.tmp")
+    tmp = destination_path.with_suffix(".yaml.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    tmp.replace(case_path)
+
+    tmp.replace(destination_path)
+    if destination_path != case_path and case_path.exists():
+        case_path.unlink()
+
+    return destination_path
