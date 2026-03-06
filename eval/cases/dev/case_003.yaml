@@ -1,0 +1,106 @@
+id: case_003
+name: "Freight Visibility - Dashboard Persona Conflict"
+description: >
+  Tests that the research agent correctly identifies the persona conflict
+  (ops managers need aggregate exception views, drivers need per-stop pickup
+  detail) and that the PRD produces separate user stories for each persona.
+  Validates persona memory recall and decision_log seeding.
+split: dev
+market_context: >
+  Freight visibility SaaS, serving LTL and FTL freight brokers, Series B,
+  ARR $15M. Two distinct personas: operations managers overseeing 100-300
+  active shipments and drivers managing their daily route stops.
+question: >
+  We are getting conflicting signals about the dashboard experience from
+  different user types. What do our users actually need and how should we
+  resolve the UX conflict in the next product release?
+auto_confirm: true
+
+interviews:
+  - filename: "ops_manager_interview.txt"
+    content: |
+      Researcher: Describe your morning workflow.
+
+      Operations Manager: I start at 7am by checking the dashboard. I need
+      to know which of my 200 active shipments are at risk before my standup
+      at 7:30. The current view shows me one shipment at a time. I click
+      through each one to check status. That takes 45 minutes on a bad day.
+
+      Researcher: What would make this better?
+
+      Operations Manager: A single screen sorted by exception severity.
+      Color-coded. Red means a shipment is late or uncontactable, yellow
+      means delayed but recoverable, green means on track. I should never
+      have to click into an individual shipment during my morning review
+      unless something is critical. I do not care about per-stop detail —
+      that is the driver's job.
+
+      Researcher: Would you pay more for this?
+
+      Operations Manager: Yes. This alone would justify renewing at a
+      25 percent higher contract value. I have raised it in every QBR.
+
+  - filename: "driver_interview.txt"
+    content: |
+      Researcher: Walk me through how you use the app on a typical day.
+
+      Driver: I load the app when I start my route. The app shows me
+      the full route overview which is fine. But at each stop I need to
+      know exactly what I am picking up — item count, pallet weight,
+      special handling requirements. Right now I have to call dispatch
+      for every stop. That is four or five calls per day, each three
+      minutes long.
+
+      Researcher: Why do you call instead of using the app?
+
+      Driver: Because the app does not show stop-level pickup detail.
+      It only shows the route summary. Dispatch has to look it up in a
+      different system and read it to me over the phone. It wastes
+      everyone's time.
+
+      Researcher: What would you need to stop calling?
+
+      Driver: Just show me the stop detail on the app before I arrive.
+      Item list, pallet count, any special instructions. That is it.
+
+prior_memory:
+  - type: persona
+    title: "Ops Manager persona - aggregate visibility need"
+    content: >
+      Operations managers oversee 100-300 active shipments simultaneously.
+      They need exception-based aggregate dashboards sorted by severity.
+      They explicitly do NOT want per-stop detail in their view.
+    confidence: medium
+
+expected_facts:
+  - "ops manager"
+  - "driver"
+  - "dashboard"
+  - "45 minutes"
+  - "exception"
+  - "stop detail"
+
+forbidden_facts:
+  - "all users want the same"
+  - "single view serves everyone"
+
+expected_prd_assertions:
+  - type: min_list_length
+    field: user_stories
+    count: 2
+  - type: field_nonempty
+    field: problem_statement
+  - type: min_list_length
+    field: kpis
+    count: 2
+  - type: field_contains
+    field: full_markdown
+    substring: "driver"
+
+expected_memory_assertions:
+  - type: min_recalled
+    count: 1
+  - type: decision_stored
+    item_type: persona
+
+gold_outputs: {}

@@ -1,0 +1,96 @@
+id: case_002
+name: "Route Optimization SaaS - Integration API Contradiction"
+description: >
+  Tests that the research agent surfaces the contradiction between two
+  prospects (one needs SOAP for legacy TMS, one loves REST but has webhook
+  reliability issues) and that the PRD constraints section addresses both
+  integration paths. Tests contradiction detection capability.
+split: dev
+market_context: >
+  B2B SaaS for last-mile route optimization, mid-market distribution
+  companies, ARR $3M, Seed stage. Persona: IT directors and CTOs at
+  distributors with 50-500 vehicles and legacy TMS systems (SAP, Oracle).
+question: >
+  What are the top integration barriers preventing our enterprise prospects
+  from adopting the platform, and what should the engineering team prioritise
+  in the next two sprints?
+auto_confirm: true
+
+interviews:
+  - filename: "prospect_interview_a.txt"
+    content: |
+      PM: Walk me through your evaluation process.
+
+      CTO: Our TMS runs on a system from 2009. It only speaks SOAP over
+      HTTPS. We evaluated your REST API documentation and it is clean, but
+      we would need a middleware layer to bridge SOAP. Our team estimated
+      three months of integration work. That is a non-starter for us at
+      this stage.
+
+      PM: Is there a workaround you would consider?
+
+      CTO: If you had a SOAP wrapper or a pre-built connector for SAP TM
+      we would sign immediately. That is the only blocker. Everything else
+      about the product is exactly what we need. We have 200 vehicles and
+      the routing optimisation could save us 18 percent on fuel costs.
+
+      PM: What is the decision timeline?
+
+      CTO: Q3 this year. If you do not have a SOAP solution by then we
+      will go with your competitor who already has legacy connectors.
+
+  - filename: "prospect_interview_b.txt"
+    content: |
+      PM: How has the integration been going?
+
+      IT Director: We love that you have a REST API. Our team built a
+      connector in two weeks. The webhook reliability is the issue — we
+      dropped about 8 percent of delivery status events during last month
+      peak load. That caused reconciliation problems with our WMS.
+
+      PM: How critical is that 8 percent figure?
+
+      IT Director: For us it triggers a manual audit every week. That is
+      about 6 hours of labor per audit. If you get that below 1 percent
+      we would expand the contract from 50 vehicles to the full 300-vehicle
+      fleet. That is roughly a 6x revenue expansion for you.
+
+      PM: Is there a deadline?
+
+      IT Director: We review contracts in 90 days. If reliability is not
+      fixed by then, we cap at 50 vehicles.
+
+prior_memory: []
+
+expected_facts:
+  - "SOAP"
+  - "REST"
+  - "webhook"
+  - "8 percent"
+  - "integration"
+  - "3 months"
+
+forbidden_facts:
+  - "no integration issues"
+  - "all customers want REST"
+
+expected_prd_assertions:
+  - type: field_nonempty
+    field: problem_statement
+  - type: min_list_length
+    field: user_stories
+    count: 2
+  - type: min_list_length
+    field: kpis
+    count: 2
+  - type: field_contains
+    field: full_markdown
+    substring: "integration"
+  - type: field_nonempty
+    field: constraints_and_risks
+
+expected_memory_assertions:
+  - type: min_recalled
+    count: 0
+
+gold_outputs: {}

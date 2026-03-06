@@ -1,0 +1,116 @@
+id: case_001
+name: "B2B Logistics - Carrier Onboarding Pain Points"
+description: >
+  Tests that the research agent extracts quantified friction metrics from
+  two carrier interview transcripts (EDI setup time, onboarding duration,
+  app adoption rate) and that the PRD frames the onboarding bottleneck
+  with at least 3 user stories and 2 KPIs.
+split: dev
+market_context: >
+  B2B logistics SaaS platform serving mid-market freight brokers and 3PLs.
+  ARR $8M, Series A. Primary persona: operations managers and dispatch leads
+  at carriers with 20-500 trucks. Key competitors: legacy TMS vendors.
+question: >
+  What are the biggest pain points carriers face during onboarding, and
+  what should we prioritise in the next quarter to reduce churn risk?
+auto_confirm: true
+
+interviews:
+  - filename: "carrier_interview_01.txt"
+    content: |
+      Interviewer: Walk me through your first week using the platform.
+
+      Carrier Ops Director: Honestly, it was rough. The EDI mapping took
+      our IT team three full days just to get a basic 214 status update
+      flowing correctly. We have 12 different load types and the system
+      only auto-mapped four of them out of the box. Our dispatcher had to
+      manually re-enter data for eight load types for the first two weeks.
+      That is roughly 40 hours of manual work we did not budget for.
+
+      Interviewer: Did you consider switching platforms during that period?
+
+      Carrier Ops Director: Absolutely. We had a call with a competitor
+      on day five. What kept us was the pricing — we had already committed
+      to a 12-month contract. But three of our driver managers still use
+      spreadsheets six weeks in because they never got trained properly.
+
+      Interviewer: What would have made onboarding faster?
+
+      Carrier Ops Director: A migration tool for existing EDI templates.
+      And a real person to call, not just a help-desk ticket. Response
+      time on our tickets averaged 2.3 days in the first month.
+
+  - filename: "carrier_interview_02.txt"
+    content: |
+      PM: How long did it take you to process your first load end-to-end
+      on the platform?
+
+      Fleet Manager: About 11 days from contract signature to first
+      accepted load. Industry standard we were told was 5 days. The
+      delay was mostly waiting for your team to configure our rate tables —
+      nobody told us that was manual on your end.
+
+      PM: What percentage of your drivers are actively using the mobile app?
+
+      Fleet Manager: Maybe 30 percent. The rest said the app crashes
+      when they have a spotty LTE connection. We haul through rural
+      Missouri and Kansas a lot. That is a big deal for us.
+
+      PM: Would you renew at end of contract?
+
+      Fleet Manager: Honestly unsure. If onboarding had been smoother
+      we would be a definite yes. Right now it is 50-50. We have already
+      flagged this to our account manager.
+
+prior_memory:
+  - type: constraint
+    title: "Offline mode requirement for rural carriers"
+    content: >
+      Carriers operating in rural areas (Missouri, Kansas corridors) require
+      the mobile app to function with intermittent LTE connectivity. This is
+      a hard constraint raised by the fleet manager persona.
+    confidence: high
+  - type: metric
+    title: "Industry-standard onboarding timeline"
+    content: >
+      Industry benchmark for carrier onboarding is 5 days from contract
+      signature to first accepted load. Current platform average is 11 days.
+      Gap = 6 days.
+    confidence: high
+
+expected_facts:
+  - "EDI"
+  - "onboarding"
+  - "manual"
+  - "11 days"
+  - "30"
+  - "mobile app"
+
+forbidden_facts:
+  - "no data available"
+  - "insufficient information"
+
+expected_prd_assertions:
+  - type: field_nonempty
+    field: problem_statement
+  - type: field_nonempty
+    field: user_stories
+  - type: min_list_length
+    field: user_stories
+    count: 3
+  - type: min_list_length
+    field: kpis
+    count: 2
+  - type: field_nonempty
+    field: constraints_and_risks
+  - type: field_contains
+    field: full_markdown
+    substring: "onboard"
+
+expected_memory_assertions:
+  - type: min_recalled
+    count: 1
+  - type: decision_stored
+    item_type: metric
+
+gold_outputs: {}

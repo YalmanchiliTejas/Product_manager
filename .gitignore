@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# Eval runtime artifacts (generated, not committed)
+eval/artifacts/
+eval/results/
