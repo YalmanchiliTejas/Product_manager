@@ -35,6 +35,23 @@ API overview:
     GET    /api/memory/{project_id}/{user_id} — List all memories for a project/user
     DELETE /api/memory/{memory_id}            — Delete a specific memory
 
+    # Knowledge Graph
+    POST   /api/knowledge-graph/entities/extract       — Extract entities from sources
+    GET    /api/knowledge-graph/entities/{project_id}  — List entities
+    GET    /api/knowledge-graph/entities/{id}/connections — Entity connections
+    GET    /api/knowledge-graph/snapshots/{project_id} — List memory snapshots
+    POST   /api/knowledge-graph/snapshots/compare      — Compare two snapshots
+    POST   /api/knowledge-graph/snapshots/compare-latest — Auto-compare latest
+    GET    /api/knowledge-graph/trends/{project_id}    — Trend history
+    POST   /api/knowledge-graph/trends/trending        — Trending themes
+    POST   /api/knowledge-graph/correlations/detect    — Detect correlations
+    GET    /api/knowledge-graph/correlations/{project_id} — List correlations
+    GET    /api/knowledge-graph/relationships/{project_id} — Theme relationships
+    POST   /api/knowledge-graph/synthesis/compare      — Compare syntheses
+    GET    /api/knowledge-graph/synthesis/timeline/{project_id} — Timeline
+    POST   /api/knowledge-graph/synthesis/temporal     — Full temporal synthesis
+    GET    /api/knowledge-graph/synthesis/report/{project_id}/{synthesis_id}
+
     # Interview Agent
     POST   /api/interview/sessions              — Create interview session
     GET    /api/interview/sessions/{id}         — Get session state
@@ -51,7 +68,7 @@ API overview:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import interview, memory, projects, search, sources, synthesis
+from backend.routers import interview, knowledge_graph, memory, projects, search, sources, synthesis
 
 app = FastAPI(
     title="Product Manager AI Backend",
@@ -78,6 +95,7 @@ app.include_router(sources.router)
 app.include_router(search.router)
 app.include_router(synthesis.router)
 app.include_router(memory.router)
+app.include_router(knowledge_graph.router)
 app.include_router(interview.router)
 
 

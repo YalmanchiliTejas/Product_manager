@@ -330,3 +330,143 @@ class TicketResponse(BaseModel):
     estimated_points: int | None = None
     parent_id: str | None = None
     labels: list[str]
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph — Entities
+# ---------------------------------------------------------------------------
+
+class EntityExtractionRequest(BaseModel):
+    project_id: str = Field(..., description="Project UUID.")
+    source_id: str | None = Field(
+        None, description="Extract from a specific source. If omitted, extracts from all."
+    )
+
+
+class EntityExtractionResponse(BaseModel):
+    sources_processed: int = 0
+    entities_found: int = 0
+    mentions_created: int = 0
+
+
+class EntityResponse(BaseModel):
+    id: str
+    entity_type: str
+    canonical_name: str
+    aliases: list[str]
+    description: str
+    first_seen_at: str
+    last_seen_at: str
+    mention_count: int
+    metadata: dict
+
+
+class EntityConnectionsResponse(BaseModel):
+    entity_id: str
+    mentions: list[dict]
+    unique_sources: int
+    unique_chunks: int
+    source_ids: list[str]
+    chunk_ids: list[str]
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph — Snapshot Comparison
+# ---------------------------------------------------------------------------
+
+class SnapshotComparisonRequest(BaseModel):
+    project_id: str = Field(..., description="Project UUID.")
+    baseline_snapshot_id: str = Field(..., description="Older snapshot UUID.")
+    current_snapshot_id: str = Field(..., description="Newer snapshot UUID.")
+
+
+class SnapshotComparisonResponse(BaseModel):
+    new_items: list[dict]
+    removed_items: list[dict]
+    changed_items: list[dict]
+    summary: str
+
+
+class SnapshotListResponse(BaseModel):
+    snapshots: list[dict]
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph — Trend Detection
+# ---------------------------------------------------------------------------
+
+class TrendResponse(BaseModel):
+    trends: list[dict]
+
+
+class TrendingThemesRequest(BaseModel):
+    project_id: str = Field(..., description="Project UUID.")
+    direction: str | None = Field(
+        None,
+        description="Filter by trend direction: emerging, accelerating, stable, declining, resurgent.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph — Signal Correlation
+# ---------------------------------------------------------------------------
+
+class SignalCorrelationRequest(BaseModel):
+    project_id: str = Field(..., description="Project UUID.")
+    synthesis_id: str = Field(..., description="Synthesis UUID to analyze.")
+
+
+class SignalCorrelationResponse(BaseModel):
+    relationships: list[dict]
+    correlations: list[dict]
+    segment_divergences: list[dict]
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph — Synthesis Comparison
+# ---------------------------------------------------------------------------
+
+class SynthesisComparisonRequest(BaseModel):
+    project_id: str = Field(..., description="Project UUID.")
+    baseline_synthesis_id: str = Field(..., description="Older synthesis UUID.")
+    current_synthesis_id: str = Field(..., description="Newer synthesis UUID.")
+
+
+class SynthesisComparisonResponse(BaseModel):
+    new_themes: list[dict]
+    removed_themes: list[dict]
+    accelerating_themes: list[dict]
+    declining_themes: list[dict]
+    stable_themes: list[dict]
+    contradictions: list[dict]
+    summary: str
+
+
+class SynthesisTimelineResponse(BaseModel):
+    syntheses: list[dict]
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Graph — Temporal Synthesis (full pipeline with intelligence)
+# ---------------------------------------------------------------------------
+
+class TemporalSynthesisRequest(BaseModel):
+    project_id: str = Field(..., description="Project UUID.")
+    source_ids: list[str] | None = Field(None, description="Restrict to these source UUIDs.")
+    model_used: str | None = Field(None, description="Override model label.")
+    max_drill_down_iterations: int = Field(2, ge=0, le=5)
+    extract_entities: bool = Field(
+        True, description="Run entity extraction after synthesis."
+    )
+
+
+class TemporalSynthesisResponse(BaseModel):
+    synthesis_id: str
+    themes: list[dict]
+    opportunities: list[dict]
+    iterations: int
+    theme_count: int
+    opportunity_count: int
+    temporal_context: dict
+    postprocess: dict
+    report: str
