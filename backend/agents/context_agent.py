@@ -14,7 +14,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from backend.agents.state import InterviewState
 from backend.services.llm import get_fast_llm
 
-
+'''
+doc stirng: 
+'''
 _CONTEXT_ASSESSMENT_PROMPT = """\
 You are a context assessment specialist for a product management AI system.
 
